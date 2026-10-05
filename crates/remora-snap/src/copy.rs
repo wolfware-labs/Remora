@@ -14,7 +14,9 @@ use sha2::{Digest, Sha256};
 
 use crate::error::io_at;
 use crate::scan::{Kind, scan};
-use crate::{Manifest, Node, SnapError, SnapOptions, Snapshot, SnapshotId, Snapshotter};
+use crate::{
+    Manifest, Node, RestoreReport, SnapError, SnapOptions, Snapshot, SnapshotId, Snapshotter, platform,
+};
 
 #[derive(Debug, Clone)]
 pub struct CopySnapshotter {
@@ -51,6 +53,19 @@ impl CopySnapshotter {
             write_atomic(&path, bytes).map_err(io_at(&path))?;
         }
         Ok(hash)
+    }
+
+    /// Returns `Ok(true)` if the file was (re)written, `Ok(false)` if it already matched.
+    fn restore_file(&self, abs: &Path, hash: &str, mode: u32) -> io::Result<bool> {
+        let unchanged =
+            fs::symlink_metadata(abs).is_ok_and(|m| m.is_file()) && hash_file(abs).is_ok_and(|h| h == hash);
+        if !unchanged {
+            let bytes = fs::read(self.blob_path(hash))
+                .map_err(|e| io::Error::new(e.kind(), format!("reading blob {hash}: {e}")))?;
+            write_atomic(abs, &bytes)?;
+        }
+        platform::set_mode(abs, mode)?;
+        Ok(!unchanged)
     }
 }
 
@@ -126,6 +141,97 @@ impl Snapshotter for CopySnapshotter {
             source,
         })
     }
+
+    fn restore(&self, root: &Path, id: &SnapshotId) -> Result<RestoreReport, SnapError> {
+        let manifest = self.manifest(id)?;
+        fs::create_dir_all(root).map_err(io_at(root))?;
+        let root = root.canonicalize().map_err(io_at(root))?;
+        let current = scan(&root, &self.opts, &self.store)?;
+        let mut report = RestoreReport::default();
+
+        // 1. Remove what the snapshot lacks or has as a different type. Reverse order: children first.
+        for (rel, entry) in current.entries.iter().rev() {
+            if manifest.protects_gap(rel) {
+                continue;
+            }
+            let keep = manifest
+                .nodes
+                .get(rel)
+                .is_some_and(|node| same_type(node, &entry.kind));
+            if keep {
+                continue;
+            }
+            match remove_path(&entry.abs) {
+                Ok(()) => report.deleted += 1,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+                Err(e) => report.failed.push((rel.clone(), e.to_string())),
+            }
+        }
+
+        // 2. Recreate in path order, so parents exist before children.
+        for (rel, node) in &manifest.nodes {
+            if manifest.protects_gap(rel) {
+                if node.is_protected_gap() {
+                    report.skipped.push(rel.clone());
+                }
+                continue;
+            }
+            let abs = root.join(rel);
+            let result = match node {
+                Node::Dir { .. } => fs::create_dir_all(&abs).map(|()| false),
+                Node::File { hash, mode, .. } => self.restore_file(&abs, hash, *mode),
+                Node::Symlink { target } => restore_symlink(&abs, target),
+                Node::Opaque => Ok(false),
+            };
+            match result {
+                Ok(true) => report.written += 1,
+                Ok(false) => {}
+                Err(e) => report.failed.push((rel.clone(), e.to_string())),
+            }
+        }
+
+        // 3. Directory modes last, children first, so a read-only dir never blocks a write.
+        for (rel, node) in manifest.nodes.iter().rev() {
+            if let Node::Dir { mode } = node
+                && !manifest.protects_gap(rel)
+                && let Err(e) = platform::set_mode(&root.join(rel), *mode)
+            {
+                report.failed.push((rel.clone(), e.to_string()));
+            }
+        }
+
+        Ok(report)
+    }
+}
+
+fn same_type(node: &Node, kind: &Kind) -> bool {
+    matches!(
+        (node, kind),
+        (Node::Dir { .. }, Kind::Dir { .. })
+            | (Node::File { .. }, Kind::File { .. })
+            | (Node::Symlink { .. }, Kind::Symlink { .. })
+    )
+}
+
+fn remove_path(abs: &Path) -> io::Result<()> {
+    if fs::symlink_metadata(abs)?.is_dir() {
+        fs::remove_dir_all(abs)
+    } else {
+        fs::remove_file(abs)
+    }
+}
+
+fn restore_symlink(abs: &Path, target: &str) -> io::Result<bool> {
+    if fs::read_link(abs).is_ok_and(|t| t.as_os_str() == target) {
+        return Ok(false);
+    }
+    match fs::remove_file(abs) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    platform::create_symlink(target, abs)?;
+    Ok(true)
 }
 
 /// Write via a temp file in the same directory, then rename over the target.

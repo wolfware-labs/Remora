@@ -45,10 +45,25 @@ pub struct Snapshot {
     pub unprotected: Vec<PathBuf>,
 }
 
+/// Result of a restore.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RestoreReport {
+    /// Files and symlinks written.
+    pub written: usize,
+    /// Paths removed because they did not exist in the snapshot.
+    pub deleted: usize,
+    /// Paths left untouched because the snapshot could not protect them.
+    pub skipped: Vec<String>,
+    /// Paths that could not be restored, with the error message.
+    pub failed: Vec<(String, String)>,
+}
+
 /// A snapshot backend.
 pub trait Snapshotter {
     /// Capture the current state of `root`.
     fn snapshot(&self, root: &Path) -> Result<Snapshot, SnapError>;
+    /// Make `root` match snapshot `id` exactly (excluded directories aside).
+    fn restore(&self, root: &Path, id: &SnapshotId) -> Result<RestoreReport, SnapError>;
     /// Load the manifest of snapshot `id`.
     fn manifest(&self, id: &SnapshotId) -> Result<Manifest, SnapError>;
 }
