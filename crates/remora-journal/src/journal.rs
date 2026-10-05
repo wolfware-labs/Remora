@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use ed25519_dalek::{Signer, SigningKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, key};
@@ -35,6 +35,30 @@ pub struct Entry {
     pub hash: String,
     /// Hex-encoded ed25519 signature over `hash`.
     pub signature: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BreakReason {
+    /// A column could not be decoded back into a record.
+    Unparseable,
+    /// `prev_hash` does not match the previous entry's hash (entry deleted or reordered).
+    ChainBroken,
+    /// The content does not match the stored hash (entry edited).
+    HashMismatch,
+    /// The signature does not match the hash (hash forged without the key).
+    BadSignature,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifyReport {
+    Intact {
+        entries: usize,
+    },
+    /// The first entry that fails verification.
+    Broken {
+        seq: i64,
+        reason: BreakReason,
+    },
 }
 
 pub struct Journal {
@@ -174,5 +198,43 @@ impl Journal {
             });
         }
         Ok(out)
+    }
+
+    /// Walk the chain from the start and report the first broken entry, if any.
+    /// Never modifies the journal: a broken chain is evidence, not something to repair.
+    pub fn verify(&self) -> Result<VerifyReport, JournalError> {
+        let verifying_key = self.key.verifying_key();
+        let mut stmt = self.conn.prepare(SELECT_ALL)?;
+        let rows = stmt.query_map([], RawRow::from_row)?;
+        let mut expected_prev = GENESIS_HASH.to_owned();
+        let mut count = 0;
+
+        for row in rows {
+            let row = row?;
+            let broken = |reason| Ok(VerifyReport::Broken { seq: row.seq, reason });
+            let Ok(record) = row.record() else {
+                return broken(BreakReason::Unparseable);
+            };
+            if row.prev_hash != expected_prev {
+                return broken(BreakReason::ChainBroken);
+            }
+            if compute_hash(&row.prev_hash, &record) != row.hash {
+                return broken(BreakReason::HashMismatch);
+            }
+            let signature_ok = hex::decode(&row.signature)
+                .ok()
+                .and_then(|bytes| <[u8; 64]>::try_from(bytes).ok())
+                .is_some_and(|bytes| {
+                    verifying_key
+                        .verify(row.hash.as_bytes(), &Signature::from_bytes(&bytes))
+                        .is_ok()
+                });
+            if !signature_ok {
+                return broken(BreakReason::BadSignature);
+            }
+            expected_prev = row.hash;
+            count += 1;
+        }
+        Ok(VerifyReport::Intact { entries: count })
     }
 }

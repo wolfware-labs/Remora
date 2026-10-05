@@ -16,5 +16,5 @@ mod record;
 
 pub use chain::{GENESIS_HASH, compute_hash};
 pub use error::JournalError;
-pub use journal::{Entry, Journal};
+pub use journal::{BreakReason, Entry, Journal, VerifyReport};
 pub use record::{CommandRecord, EntryKind, EntryRecord, FileChange, FileChangeKind};
