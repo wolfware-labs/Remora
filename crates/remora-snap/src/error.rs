@@ -19,6 +19,10 @@ pub enum SnapError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("invalid manifest for snapshot {id}: {reason}")]
+    InvalidManifest { id: String, reason: String },
+    #[error("blob {0} is missing from the store")]
+    MissingBlob(String),
 }
 
 /// Attach a path to an `io::Error`: `fs::read(p).map_err(io_at(p))`.

@@ -13,8 +13,7 @@ impl SnapshotId {
     /// Parse an id. Rejects anything that is not 64 lowercase hex characters,
     /// so an id can never be used for path traversal in the store.
     pub fn parse(s: &str) -> Result<Self, SnapError> {
-        let valid = s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
-        if valid {
+        if is_sha256_hex(s) {
             Ok(Self(s.to_owned()))
         } else {
             Err(SnapError::InvalidId(s.to_owned()))
@@ -108,9 +107,39 @@ impl Manifest {
         changes
     }
 
+    /// Check that every key is a safe relative path and every file hash is well formed.
+    /// Restore relies on this: a key like `../x` or a malformed hash must never reach the filesystem.
+    pub fn validate(&self) -> Result<(), String> {
+        for (rel, node) in &self.nodes {
+            if !is_safe_relative_path(rel) {
+                return Err(format!("unsafe path {rel:?}"));
+            }
+            if let Node::File { hash, .. } = node
+                && !is_sha256_hex(hash)
+            {
+                return Err(format!("malformed hash {hash:?} for {rel:?}"));
+            }
+        }
+        Ok(())
+    }
+
     /// True if `rel` or any of its ancestors is a protected gap (see [`Node::is_protected_gap`]).
     pub fn protects_gap(&self, rel: &str) -> bool {
         let mut prefixes = rel.match_indices('/').map(|(i, _)| &rel[..i]).chain([rel]);
         prefixes.any(|p| self.nodes.get(p).is_some_and(Node::is_protected_gap))
     }
+}
+
+/// 64 lowercase hex characters.
+pub(crate) fn is_sha256_hex(s: &str) -> bool {
+    s.len() == 64 && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// A non-empty `/`-separated relative path with no empty, `.` or `..` components
+/// (and, on Windows also no `\` or `:` inside a component).
+fn is_safe_relative_path(rel: &str) -> bool {
+    !rel.is_empty()
+        && rel
+            .split('/')
+            .all(|c| !c.is_empty() && c != "." && c != ".." && !(cfg!(windows) && c.contains(['\\', ':'])))
 }

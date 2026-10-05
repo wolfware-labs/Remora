@@ -63,6 +63,12 @@ impl CopySnapshotter {
         if !unchanged {
             let bytes = fs::read(self.blob_path(hash))
                 .map_err(|e| io::Error::new(e.kind(), format!("reading blob {hash}: {e}")))?;
+            if hash_bytes(&bytes) != hash {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("blob {hash} is corrupt (its contents do not match its hash)"),
+                ));
+            }
             write_atomic(abs, &bytes)?;
         }
         platform::set_mode(abs, mode)?;
@@ -137,18 +143,44 @@ impl Snapshotter for CopySnapshotter {
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(SnapError::NotFound(id.to_string())),
             Err(e) => return Err(io_at(&path)(e)),
         };
-        serde_json::from_slice(&bytes).map_err(|source| SnapError::CorruptManifest {
+        let invalid = |reason: String| SnapError::InvalidManifest {
             id: id.to_string(),
-            source,
-        })
+            reason,
+        };
+        if hash_bytes(&bytes) != id.as_str() {
+            return Err(invalid("contents do not match the snapshot id".into()));
+        }
+        let manifest: Manifest =
+            serde_json::from_slice(&bytes).map_err(|source| SnapError::CorruptManifest {
+                id: id.to_string(),
+                source,
+            })?;
+        manifest.validate().map_err(invalid)?;
+        Ok(manifest)
     }
 
     fn restore(&self, root: &Path, id: &SnapshotId) -> Result<RestoreReport, SnapError> {
         let manifest = self.manifest(id)?;
+
+        // 0. Every blob restore needs must exist before anything is deleted.
+        for (rel, node) in &manifest.nodes {
+            if let Node::File {
+                hash, stored: true, ..
+            } = node
+                && !manifest.protects_gap(rel)
+                && !self.blob_path(hash).is_file()
+            {
+                return Err(SnapError::MissingBlob(hash.clone()));
+            }
+        }
+
         fs::create_dir_all(root).map_err(io_at(root))?;
         let root = root.canonicalize().map_err(io_at(root))?;
         let current = scan(&root, &self.opts, &self.store)?;
         let mut report = RestoreReport::default();
+        // Paths whose removal failed. They (and everything under them) are never written
+        // or chmod-ed: a surviving symlink would otherwise be followed outside the root.
+        let mut blocked: Vec<String> = Vec::new();
 
         // 1. Remove what the snapshot lacks or has as a different type. Reverse order: children first.
         for (rel, entry) in current.entries.iter().rev() {
@@ -165,9 +197,20 @@ impl Snapshotter for CopySnapshotter {
             match remove_path(&entry.abs) {
                 Ok(()) => report.deleted += 1,
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
-                Err(e) => report.failed.push((rel.clone(), e.to_string())),
+                Err(e) => {
+                    report.failed.push((rel.clone(), e.to_string()));
+                    blocked.push(rel.clone());
+                }
             }
         }
+        let is_blocked = |rel: &str| {
+            blocked.iter().any(|b| {
+                rel == b
+                    || rel
+                        .strip_prefix(b.as_str())
+                        .is_some_and(|rest| rest.starts_with('/'))
+            })
+        };
 
         // 2. Recreate in path order, so parents exist before children.
         for (rel, node) in &manifest.nodes {
@@ -175,6 +218,9 @@ impl Snapshotter for CopySnapshotter {
                 if node.is_protected_gap() {
                     report.skipped.push(rel.clone());
                 }
+                continue;
+            }
+            if is_blocked(rel) {
                 continue;
             }
             let abs = root.join(rel);
@@ -195,6 +241,7 @@ impl Snapshotter for CopySnapshotter {
         for (rel, node) in manifest.nodes.iter().rev() {
             if let Node::Dir { mode } = node
                 && !manifest.protects_gap(rel)
+                && !is_blocked(rel)
                 && let Err(e) = platform::set_mode(&root.join(rel), *mode)
             {
                 report.failed.push((rel.clone(), e.to_string()));
