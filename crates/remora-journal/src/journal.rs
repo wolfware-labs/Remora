@@ -1,10 +1,9 @@
-use std::fs;
 use std::path::Path;
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
-use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, key};
+use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, key, private};
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -120,12 +119,15 @@ impl RawRow {
 impl Journal {
     /// Open (or create) the journal in `dir`: `journal.db` plus `signing.key`.
     pub fn open(dir: &Path) -> Result<Self, JournalError> {
-        fs::create_dir_all(dir).map_err(|source| JournalError::Io {
-            path: dir.to_path_buf(),
-            source,
-        })?;
+        let io_err = |path: &Path| {
+            let path = path.to_path_buf();
+            move |source| JournalError::Io { path, source }
+        };
+        private::create_dir_all(dir).map_err(io_err(dir))?;
         let key = key::load_or_create(&dir.join("signing.key"))?;
-        let conn = Connection::open(dir.join("journal.db"))?;
+        let db = dir.join("journal.db");
+        private::ensure_file(&db).map_err(io_err(&db))?;
+        let conn = Connection::open(&db)?;
         conn.execute_batch(SCHEMA)?;
         Ok(Self { conn, key })
     }

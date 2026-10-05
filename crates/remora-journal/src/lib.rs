@@ -12,6 +12,7 @@ mod chain;
 mod error;
 mod journal;
 mod key;
+mod private;
 mod record;
 
 pub use chain::{GENESIS_HASH, compute_hash};
