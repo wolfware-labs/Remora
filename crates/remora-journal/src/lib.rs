@@ -9,7 +9,12 @@
 //! this gap by uploading signed entries off the machine.
 
 mod chain;
+mod error;
+mod journal;
+mod key;
 mod record;
 
 pub use chain::{GENESIS_HASH, compute_hash};
+pub use error::JournalError;
+pub use journal::{Entry, Journal};
 pub use record::{CommandRecord, EntryKind, EntryRecord, FileChange, FileChangeKind};
