@@ -114,6 +114,14 @@ impl Manifest {
             if !is_safe_relative_path(rel) {
                 return Err(format!("unsafe path {rel:?}"));
             }
+            // Every ancestor must be a directory in this manifest. Otherwise a node under a
+            // symlink (or under a file) would be written through it, outside the root.
+            let mut ancestors = rel.match_indices('/').map(|(i, _)| &rel[..i]);
+            if let Some(parent) = ancestors.find(|a| !matches!(self.nodes.get(*a), Some(Node::Dir { .. }))) {
+                return Err(format!(
+                    "{rel:?} is under {parent:?}, which is not a directory in the snapshot"
+                ));
+            }
             if let Node::File { hash, .. } = node
                 && !is_sha256_hex(hash)
             {

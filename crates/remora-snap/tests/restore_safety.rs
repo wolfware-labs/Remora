@@ -54,6 +54,41 @@ fn a_manifest_key_escaping_the_root_is_rejected() {
 }
 
 #[test]
+fn a_node_under_a_symlink_node_is_rejected() {
+    let outer = tempfile::TempDir::new().unwrap();
+    let project = outer.path().join("project");
+    let victim = outer.path().join("victim");
+    fs::create_dir(&project).unwrap();
+    fs::create_dir(&victim).unwrap();
+    fs::write(project.join("a.txt"), "a").unwrap();
+    let store = tempfile::TempDir::new().unwrap();
+    let snap = CopySnapshotter::new(store.path(), SnapOptions::default()).unwrap();
+    let real = snap.manifest(&snap.snapshot(&project).unwrap().id).unwrap();
+    let mut evil = Manifest::default();
+    evil.nodes.insert(
+        "l".into(),
+        Node::Symlink {
+            target: victim.to_str().unwrap().into(),
+        },
+    );
+    evil.nodes.insert("l/x.txt".into(), real.nodes["a.txt"].clone());
+    let json = serde_json::to_vec(&evil).unwrap();
+    let id = hex::encode(Sha256::digest(&json));
+    fs::write(store.path().join("manifests").join(format!("{id}.json")), json).unwrap();
+
+    let result = snap.restore(&project, &SnapshotId::parse(&id).unwrap());
+
+    assert!(
+        matches!(result, Err(SnapError::InvalidManifest { .. })),
+        "{result:?}"
+    );
+    assert!(
+        !victim.join("x.txt").exists(),
+        "restore wrote through a symlink node"
+    );
+}
+
+#[test]
 fn a_malformed_hash_is_rejected_instead_of_panicking() {
     let fx = Fixture::new();
     let mut evil = Manifest::default();
