@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SnapError {
@@ -19,4 +19,12 @@ pub enum SnapError {
         #[source]
         source: serde_json::Error,
     },
+}
+
+/// Attach a path to an `io::Error`: `fs::read(p).map_err(io_at(p))`.
+pub(crate) fn io_at(path: &Path) -> impl FnOnce(io::Error) -> SnapError + '_ {
+    move |source| SnapError::Io {
+        path: path.to_path_buf(),
+        source,
+    }
 }
