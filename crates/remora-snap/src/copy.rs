@@ -7,8 +7,9 @@
 //! ```
 
 use std::fs::{self, File};
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use sha2::{Digest, Sha256};
 
@@ -30,7 +31,7 @@ impl CopySnapshotter {
         let store = store.into();
         for sub in ["blobs", "manifests"] {
             let dir = store.join(sub);
-            fs::create_dir_all(&dir).map_err(io_at(&dir))?;
+            platform::create_private_dir_all(&dir).map_err(io_at(&dir))?;
         }
         let store = store.canonicalize().map_err(io_at(&store))?;
         Ok(Self { store, opts })
@@ -49,7 +50,7 @@ impl CopySnapshotter {
         let path = self.blob_path(&hash);
         if !path.exists() {
             let dir = path.parent().expect("blob path has a parent");
-            fs::create_dir_all(dir).map_err(io_at(dir))?;
+            platform::create_private_dir_all(dir).map_err(io_at(dir))?;
             write_atomic(&path, bytes).map_err(io_at(&path))?;
         }
         Ok(hash)
@@ -234,12 +235,30 @@ fn restore_symlink(abs: &Path, target: &str) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Write via a temp file in the same directory, then rename over the target.
+/// Distinguishes temp files written concurrently by threads of this process.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Write via an owner-only temp file in the same directory, then rename over the target.
+///
+/// The temp name is unique per process and call, so concurrent writers never share a
+/// temp file. It is created exclusively (`create_new`), so a symlink planted at that
+/// path makes the write fail instead of being followed. The data is synced before the
+/// rename, so a crash cannot leave a truncated file under the final name.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let tmp = path.with_file_name(format!(".{name}.remora-tmp"));
-    fs::write(&tmp, bytes)?;
-    fs::rename(&tmp, path)
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp = path.with_file_name(format!(".{name}.{}.{n}.remora-tmp", std::process::id()));
+    let result = (|| {
+        let mut file = platform::create_private_file(&tmp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
 }
 
 fn hash_bytes(bytes: &[u8]) -> String {
