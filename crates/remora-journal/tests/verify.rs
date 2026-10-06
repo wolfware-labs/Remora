@@ -131,6 +131,52 @@ fn garbage_in_a_column_is_unparseable() {
     );
 }
 
+#[test]
+fn a_column_holding_the_wrong_type_is_unparseable() {
+    for (column, value) in [("started_at_ms", "'abc'"), ("prompt", "X'00'"), ("kind", "5")] {
+        let dir = TempDir::new().unwrap();
+        let j = journal_with_three(dir.path());
+        raw_db(dir.path())
+            .execute(
+                &format!("UPDATE entries SET {column} = {value} WHERE seq = 2"),
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            j.verify().unwrap(),
+            VerifyReport::Broken {
+                seq: 2,
+                reason: BreakReason::Unparseable
+            },
+            "{column} = {value}"
+        );
+    }
+}
+
+#[test]
+fn a_malformed_signature_is_a_bad_signature() {
+    for value in ["'not hex'", "substr(signature, 1, 10)"] {
+        let dir = TempDir::new().unwrap();
+        let j = journal_with_three(dir.path());
+        raw_db(dir.path())
+            .execute(
+                &format!("UPDATE entries SET signature = {value} WHERE seq = 2"),
+                [],
+            )
+            .unwrap();
+
+        assert_eq!(
+            j.verify().unwrap(),
+            VerifyReport::Broken {
+                seq: 2,
+                reason: BreakReason::BadSignature
+            },
+            "signature = {value}"
+        );
+    }
+}
+
 // --- Review Focus ---
 
 #[test]

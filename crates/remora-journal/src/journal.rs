@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use ed25519_dalek::{Signature, Signer, SigningKey, Verifier};
+use ed25519_dalek::{Signature, Signer, SigningKey};
 use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
 
 use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, key, private};
@@ -207,12 +207,20 @@ impl Journal {
     pub fn verify(&self) -> Result<VerifyReport, JournalError> {
         let verifying_key = self.key.verifying_key();
         let mut stmt = self.conn.prepare(SELECT_ALL)?;
-        let rows = stmt.query_map([], RawRow::from_row)?;
+        // `seq` is the rowid, so it is always an integer; the other columns may hold any SQLite type.
+        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, RawRow::from_row(r))))?;
         let mut expected_prev = GENESIS_HASH.to_owned();
         let mut count = 0;
 
         for row in rows {
-            let row = row?;
+            let (seq, parsed) = row?;
+            // A column holding the wrong type (say text in an integer column) is tampering too.
+            let Ok(row) = parsed else {
+                return Ok(VerifyReport::Broken {
+                    seq,
+                    reason: BreakReason::Unparseable,
+                });
+            };
             let broken = |reason| Ok(VerifyReport::Broken { seq: row.seq, reason });
             let Ok(record) = row.record() else {
                 return broken(BreakReason::Unparseable);
@@ -228,7 +236,7 @@ impl Journal {
                 .and_then(|bytes| <[u8; 64]>::try_from(bytes).ok())
                 .is_some_and(|bytes| {
                     verifying_key
-                        .verify(row.hash.as_bytes(), &Signature::from_bytes(&bytes))
+                        .verify_strict(row.hash.as_bytes(), &Signature::from_bytes(&bytes))
                         .is_ok()
                 });
             if !signature_ok {
