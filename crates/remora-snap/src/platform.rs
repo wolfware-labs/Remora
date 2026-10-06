@@ -79,6 +79,39 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+/// Modification time in nanoseconds since the Unix epoch, if the platform reports one.
+pub(crate) fn mtime_ns(meta: &Metadata) -> Option<u64> {
+    let since_epoch = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+    u64::try_from(since_epoch.as_nanos()).ok()
+}
+
+#[cfg(unix)]
+pub(crate) fn inode(meta: &Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    meta.ino()
+}
+
+#[cfg(not(unix))]
+pub(crate) fn inode(_meta: &Metadata) -> u64 {
+    0
+}
+
+/// Remove group/other permissions from an existing directory (Unix); no-op elsewhere.
+#[cfg(unix)]
+pub(crate) fn tighten_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = fs::metadata(path)?.permissions().mode();
+    if mode & 0o077 != 0 {
+        fs::set_permissions(path, fs::Permissions::from_mode(mode & 0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn tighten_dir(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

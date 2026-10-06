@@ -9,12 +9,13 @@ mod error;
 mod manifest;
 mod platform;
 mod scan;
+mod statcache;
 
 use std::path::{Path, PathBuf};
 
 pub use copy::CopySnapshotter;
 pub use error::SnapError;
-pub use manifest::{Change, ChangeKind, Manifest, Node, SnapshotId};
+pub use manifest::{Change, ChangeKind, Manifest, Node, RecordedOptions, SnapshotId};
 
 /// Options shared by every backend.
 #[derive(Debug, Clone)]
@@ -43,6 +44,8 @@ pub struct Snapshot {
     pub id: SnapshotId,
     /// Paths that exist but are not protected (unreadable, too large, non-UTF-8 names).
     pub unprotected: Vec<PathBuf>,
+    /// How many files had to be read and hashed (the rest were unchanged per the stat cache).
+    pub hashed_files: usize,
 }
 
 /// Result of a restore.

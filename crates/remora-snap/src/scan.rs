@@ -18,6 +18,10 @@ pub(crate) enum Kind {
     File {
         size: u64,
         mode: u32,
+        /// Modification time in nanoseconds since the Unix epoch, if available.
+        mtime_ns: Option<u64>,
+        /// Inode number on Unix; 0 elsewhere.
+        ino: u64,
     },
     Symlink {
         target: String,
@@ -128,6 +132,8 @@ fn classify(entry: &DirEntry) -> Kind {
         Ok(meta) if ft.is_file() => Kind::File {
             size: meta.len(),
             mode: platform::mode_of(&meta),
+            mtime_ns: platform::mtime_ns(&meta),
+            ino: platform::inode(&meta),
         },
         _ => Kind::Unreadable,
     }

@@ -63,6 +63,17 @@ impl Node {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Manifest {
     pub nodes: BTreeMap<String, Node>,
+    /// The options the snapshot was taken with. Restore never touches the union of these
+    /// exclusions and its own, so changing exclusions between snapshot and restore is safe.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub options: Option<RecordedOptions>,
+}
+
+/// The snapshot options recorded in a manifest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecordedOptions {
+    pub exclude_dirs: Vec<String>,
+    pub max_file_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

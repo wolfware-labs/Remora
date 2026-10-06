@@ -4,6 +4,7 @@
 //! ```text
 //! <store>/blobs/<first 2 hex>/<remaining 62 hex>   file contents, deduplicated by SHA-256
 //! <store>/manifests/<snapshot id>.json             one manifest per snapshot
+//! <store>/statcache.json                           metadata → hash cache (see `statcache`)
 //! ```
 
 use std::fs::{self, File};
@@ -15,8 +16,10 @@ use sha2::{Digest, Sha256};
 
 use crate::error::io_at;
 use crate::scan::{Kind, scan};
+use crate::statcache::{CachedStat, StatCache};
 use crate::{
-    Manifest, Node, RestoreReport, SnapError, SnapOptions, Snapshot, SnapshotId, Snapshotter, platform,
+    Manifest, Node, RecordedOptions, RestoreReport, SnapError, SnapOptions, Snapshot, SnapshotId,
+    Snapshotter, platform,
 };
 
 #[derive(Debug, Clone)]
@@ -33,6 +36,10 @@ impl CopySnapshotter {
             let dir = store.join(sub);
             platform::create_private_dir_all(&dir).map_err(io_at(&dir))?;
         }
+        // A store created before permissions were enforced (or loosened since) is tightened.
+        for dir in [store.clone(), store.join("blobs"), store.join("manifests")] {
+            platform::tighten_dir(&dir).map_err(io_at(&dir))?;
+        }
         let store = store.canonicalize().map_err(io_at(&store))?;
         Ok(Self { store, opts })
     }
@@ -45,10 +52,16 @@ impl CopySnapshotter {
         self.store.join("manifests").join(format!("{id}.json"))
     }
 
+    fn statcache_path(&self) -> PathBuf {
+        self.store.join("statcache.json")
+    }
+
     fn put_blob(&self, bytes: &[u8]) -> Result<String, SnapError> {
         let hash = hash_bytes(bytes);
         let path = self.blob_path(&hash);
-        if !path.exists() {
+        // A blob whose size is wrong (say, truncated by a crash) is rewritten.
+        let intact = fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64);
+        if !intact {
             let dir = path.parent().expect("blob path has a parent");
             platform::create_private_dir_all(dir).map_err(io_at(dir))?;
             write_atomic(&path, bytes).map_err(io_at(&path))?;
@@ -79,9 +92,26 @@ impl CopySnapshotter {
 impl Snapshotter for CopySnapshotter {
     fn snapshot(&self, root: &Path) -> Result<Snapshot, SnapError> {
         let root = root.canonicalize().map_err(io_at(root))?;
+        let started_ns = now_ns();
         let scanned = scan(&root, &self.opts, &self.store)?;
-        let mut manifest = Manifest::default();
+        let mut manifest = Manifest {
+            options: Some(RecordedOptions {
+                exclude_dirs: self.opts.exclude_dirs.clone(),
+                max_file_bytes: self.opts.max_file_bytes,
+            }),
+            ..Manifest::default()
+        };
         let mut unprotected = scanned.non_utf8;
+        // Look up in the cache as it was; build the new one fresh for this root, so entries
+        // for files that no longer exist disappear.
+        let old_cache = StatCache::load(&self.statcache_path());
+        let mut cache = old_cache.clone();
+        cache.clear_under(&format!(
+            "{}{}",
+            root.to_string_lossy(),
+            std::path::MAIN_SEPARATOR
+        ));
+        let mut hashed_files = 0;
 
         for (rel, entry) in scanned.entries {
             let node = match entry.kind {
@@ -91,38 +121,86 @@ impl Snapshotter for CopySnapshotter {
                     unprotected.push(entry.abs);
                     Node::Opaque
                 }
-                Kind::File { size, mode } if size > self.opts.max_file_bytes => match hash_file(&entry.abs) {
-                    Ok(hash) => {
-                        unprotected.push(entry.abs);
+                Kind::File { size, mode, .. } if size > self.opts.max_file_bytes => {
+                    match hash_file(&entry.abs) {
+                        Ok(hash) => {
+                            unprotected.push(entry.abs);
+                            Node::File {
+                                hash,
+                                size,
+                                mode,
+                                stored: false,
+                            }
+                        }
+                        Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                        Err(_) => {
+                            unprotected.push(entry.abs);
+                            Node::Opaque
+                        }
+                    }
+                }
+                Kind::File {
+                    size,
+                    mode,
+                    mtime_ns,
+                    ino,
+                } => {
+                    let key = entry.abs.to_string_lossy().into_owned();
+                    let cached = mtime_ns
+                        .and_then(|m| old_cache.lookup(&key, size, m, ino, started_ns))
+                        .filter(|hash| fs::metadata(self.blob_path(hash)).is_ok_and(|b| b.len() == size))
+                        .map(str::to_owned);
+                    if let Some(hash) = cached {
+                        let mtime_ns = mtime_ns.expect("a cache hit implies an mtime");
+                        cache.insert(
+                            key,
+                            CachedStat {
+                                size,
+                                mtime_ns,
+                                ino,
+                                hash: hash.clone(),
+                            },
+                        );
                         Node::File {
                             hash,
                             size,
                             mode,
-                            stored: false,
-                        }
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => {
-                        unprotected.push(entry.abs);
-                        Node::Opaque
-                    }
-                },
-                Kind::File { mode, .. } => match fs::read(&entry.abs) {
-                    Ok(bytes) => {
-                        let hash = self.put_blob(&bytes)?;
-                        Node::File {
-                            hash,
-                            size: bytes.len() as u64,
-                            mode,
                             stored: true,
                         }
+                    } else {
+                        match fs::read(&entry.abs) {
+                            Ok(bytes) => {
+                                hashed_files += 1;
+                                let hash = self.put_blob(&bytes)?;
+                                // Only cache what was read if the file did not change since the scan.
+                                if let Some(mtime_ns) = mtime_ns
+                                    && bytes.len() as u64 == size
+                                {
+                                    cache.insert(
+                                        key,
+                                        CachedStat {
+                                            size,
+                                            mtime_ns,
+                                            ino,
+                                            hash: hash.clone(),
+                                        },
+                                    );
+                                }
+                                Node::File {
+                                    hash,
+                                    size: bytes.len() as u64,
+                                    mode,
+                                    stored: true,
+                                }
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
+                            Err(_) => {
+                                unprotected.push(entry.abs);
+                                Node::Opaque
+                            }
+                        }
                     }
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                    Err(_) => {
-                        unprotected.push(entry.abs);
-                        Node::Opaque
-                    }
-                },
+                }
             };
             manifest.nodes.insert(rel, node);
         }
@@ -130,10 +208,17 @@ impl Snapshotter for CopySnapshotter {
         let json = serde_json::to_vec(&manifest).expect("manifest always serializes");
         let id = SnapshotId::parse(&hash_bytes(&json))?;
         let path = self.manifest_path(&id);
-        if !path.exists() {
+        // A manifest whose bytes differ from what they must be (say, truncated) is rewritten.
+        if fs::read(&path).ok().as_deref() != Some(json.as_slice()) {
             write_atomic(&path, &json).map_err(io_at(&path))?;
         }
-        Ok(Snapshot { id, unprotected })
+        let cache_path = self.statcache_path();
+        write_atomic(&cache_path, &cache.to_json()).map_err(io_at(&cache_path))?;
+        Ok(Snapshot {
+            id,
+            unprotected,
+            hashed_files,
+        })
     }
 
     fn manifest(&self, id: &SnapshotId) -> Result<Manifest, SnapError> {
@@ -176,7 +261,15 @@ impl Snapshotter for CopySnapshotter {
 
         fs::create_dir_all(root).map_err(io_at(root))?;
         let root = root.canonicalize().map_err(io_at(root))?;
-        let current = scan(&root, &self.opts, &self.store)?;
+        // Leave alone everything excluded now OR when the snapshot was taken: the snapshot
+        // knows nothing about the contents of directories it excluded.
+        let mut opts = self.opts.clone();
+        for dir in manifest.options.iter().flat_map(|o| &o.exclude_dirs) {
+            if !opts.exclude_dirs.contains(dir) {
+                opts.exclude_dirs.push(dir.clone());
+            }
+        }
+        let current = scan(&root, &opts, &self.store)?;
         let mut report = RestoreReport::default();
         // Paths whose removal failed. They (and everything under them) are never written
         // or chmod-ed: a surviving symlink would otherwise be followed outside the root.
@@ -216,7 +309,7 @@ impl Snapshotter for CopySnapshotter {
             }
             // The scan never looks inside excluded directories or the store, so phase 1 cannot
             // have cleaned them up: never write there (a symlink could lead outside the root).
-            if self.is_excluded(rel, node) || root.join(rel).starts_with(&self.store) {
+            if is_excluded(&opts, rel, node) || root.join(rel).starts_with(&self.store) {
                 report.skipped.push(rel.clone());
                 continue;
             }
@@ -246,7 +339,7 @@ impl Snapshotter for CopySnapshotter {
             if let Node::Dir { mode } = node
                 && !manifest.protects_gap(rel)
                 && !is_under_any(rel, &blocked)
-                && !self.is_excluded(rel, node)
+                && !is_excluded(&opts, rel, node)
                 && !root.join(rel).starts_with(&self.store)
                 && fs::symlink_metadata(root.join(rel)).is_ok_and(|m| m.is_dir())
                 && let Err(e) = platform::set_mode(&root.join(rel), *mode)
@@ -259,14 +352,19 @@ impl Snapshotter for CopySnapshotter {
     }
 }
 
-impl CopySnapshotter {
-    /// True if `rel` lies inside an excluded directory, or is one.
-    fn is_excluded(&self, rel: &str, node: &Node) -> bool {
-        let parts: Vec<&str> = rel.split('/').collect();
-        let (last, parents) = parts.split_last().expect("split always yields one part");
-        let excluded = |name: &str| self.opts.exclude_dirs.iter().any(|x| x == name);
-        parents.iter().any(|p| excluded(p)) || (matches!(node, Node::Dir { .. }) && excluded(last))
-    }
+/// True if `rel` lies inside an excluded directory, or is one.
+fn is_excluded(opts: &SnapOptions, rel: &str, node: &Node) -> bool {
+    let parts: Vec<&str> = rel.split('/').collect();
+    let (last, parents) = parts.split_last().expect("split always yields one part");
+    let excluded = |name: &str| opts.exclude_dirs.iter().any(|x| x == name);
+    parents.iter().any(|p| excluded(p)) || (matches!(node, Node::Dir { .. }) && excluded(last))
+}
+
+fn now_ns() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 /// True if `rel` is one of `prefixes` or lies under one of them.

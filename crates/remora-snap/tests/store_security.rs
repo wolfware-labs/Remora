@@ -57,7 +57,7 @@ fn blobs_and_manifests_are_owner_only() {
     snap.snapshot(fx.root()).unwrap();
 
     let files = files_under(fx.store.path());
-    assert_eq!(files.len(), 2, "one blob and one manifest");
+    assert_eq!(files.len(), 3, "one blob, one manifest and the stat cache");
     for file in files {
         assert_eq!(mode(&file), 0o600, "{}", file.display());
     }
