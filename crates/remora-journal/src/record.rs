@@ -48,7 +48,9 @@ pub struct FileChange {
 ///
 /// The JSON serialization of this struct is the canonical form used for hashing.
 /// NEVER reorder, rename or remove fields: old journals would stop verifying.
-/// Add new fields only at the end, with `#[serde(default)]`.
+/// Add new fields only at the end, as `Option` with
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`, so an old entry (where
+/// the field is absent) serializes, and therefore hashes, exactly as it did before.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EntryRecord {
     pub session_id: String,

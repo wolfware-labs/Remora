@@ -9,7 +9,9 @@ use std::path::Path;
 use std::thread;
 
 use common::Fixture;
-use remora_snap::{CopySnapshotter, SnapOptions, Snapshotter};
+use remora_snap::Snapshotter;
+#[cfg(unix)]
+use remora_snap::{CopySnapshotter, SnapOptions};
 use sha2::{Digest, Sha256};
 
 #[cfg(unix)]

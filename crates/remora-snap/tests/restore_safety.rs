@@ -190,3 +190,47 @@ fn a_symlink_that_cannot_be_removed_is_never_written_through() {
     );
     assert!(report.failed.iter().any(|(rel, _)| rel == "p/x"));
 }
+
+#[cfg(unix)]
+#[test]
+fn restore_never_writes_into_an_excluded_dir_that_became_a_symlink() {
+    use std::os::unix::fs::PermissionsExt;
+    // Snapshot taken while node_modules was NOT excluded; restore runs with the defaults
+    // (node_modules excluded), after `npm link` turned node_modules/pkg into a symlink.
+    let outer = tempfile::TempDir::new().unwrap();
+    let project = outer.path().join("project");
+    let other_project = outer.path().join("other-project");
+    fs::create_dir_all(project.join("node_modules/pkg")).unwrap();
+    fs::write(project.join("node_modules/pkg/index.js"), "old").unwrap();
+    fs::create_dir(&other_project).unwrap();
+    fs::set_permissions(&other_project, fs::Permissions::from_mode(0o755)).unwrap();
+    let store = tempfile::TempDir::new().unwrap();
+    let no_excludes = SnapOptions {
+        exclude_dirs: vec![],
+        ..SnapOptions::default()
+    };
+    let s = CopySnapshotter::new(store.path(), no_excludes)
+        .unwrap()
+        .snapshot(&project)
+        .unwrap();
+
+    fs::remove_dir_all(project.join("node_modules/pkg")).unwrap();
+    std::os::unix::fs::symlink(&other_project, project.join("node_modules/pkg")).unwrap();
+    let report = CopySnapshotter::new(store.path(), SnapOptions::default())
+        .unwrap()
+        .restore(&project, &s.id)
+        .unwrap();
+
+    assert!(
+        !other_project.join("index.js").exists(),
+        "restore wrote into another project"
+    );
+    assert_eq!(
+        fs::metadata(&other_project).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(
+        report.skipped.iter().any(|p| p == "node_modules/pkg/index.js"),
+        "{report:?}"
+    );
+}

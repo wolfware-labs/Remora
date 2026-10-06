@@ -203,15 +203,6 @@ impl Snapshotter for CopySnapshotter {
                 }
             }
         }
-        let is_blocked = |rel: &str| {
-            blocked.iter().any(|b| {
-                rel == b
-                    || rel
-                        .strip_prefix(b.as_str())
-                        .is_some_and(|rest| rest.starts_with('/'))
-            })
-        };
-
         // 2. Recreate in path order, so parents exist before children.
         for (rel, node) in &manifest.nodes {
             if manifest.protects_gap(rel) {
@@ -220,10 +211,23 @@ impl Snapshotter for CopySnapshotter {
                 }
                 continue;
             }
-            if is_blocked(rel) {
+            if is_under_any(rel, &blocked) {
+                continue;
+            }
+            // The scan never looks inside excluded directories or the store, so phase 1 cannot
+            // have cleaned them up: never write there (a symlink could lead outside the root).
+            if self.is_excluded(rel, node) || root.join(rel).starts_with(&self.store) {
+                report.skipped.push(rel.clone());
                 continue;
             }
             let abs = root.join(rel);
+            // Never write through anything that is not a real directory: a surviving symlink
+            // (or one a case-insensitive filesystem treats as the same name) leads outside the root.
+            if let Err(e) = check_real_dirs(&root, rel, node) {
+                report.failed.push((rel.clone(), e.to_string()));
+                blocked.push(rel.clone());
+                continue;
+            }
             let result = match node {
                 Node::Dir { .. } => fs::create_dir_all(&abs).map(|()| false),
                 Node::File { hash, mode, .. } => self.restore_file(&abs, hash, *mode),
@@ -241,7 +245,10 @@ impl Snapshotter for CopySnapshotter {
         for (rel, node) in manifest.nodes.iter().rev() {
             if let Node::Dir { mode } = node
                 && !manifest.protects_gap(rel)
-                && !is_blocked(rel)
+                && !is_under_any(rel, &blocked)
+                && !self.is_excluded(rel, node)
+                && !root.join(rel).starts_with(&self.store)
+                && fs::symlink_metadata(root.join(rel)).is_ok_and(|m| m.is_dir())
                 && let Err(e) = platform::set_mode(&root.join(rel), *mode)
             {
                 report.failed.push((rel.clone(), e.to_string()));
@@ -250,6 +257,49 @@ impl Snapshotter for CopySnapshotter {
 
         Ok(report)
     }
+}
+
+impl CopySnapshotter {
+    /// True if `rel` lies inside an excluded directory, or is one.
+    fn is_excluded(&self, rel: &str, node: &Node) -> bool {
+        let parts: Vec<&str> = rel.split('/').collect();
+        let (last, parents) = parts.split_last().expect("split always yields one part");
+        let excluded = |name: &str| self.opts.exclude_dirs.iter().any(|x| x == name);
+        parents.iter().any(|p| excluded(p)) || (matches!(node, Node::Dir { .. }) && excluded(last))
+    }
+}
+
+/// True if `rel` is one of `prefixes` or lies under one of them.
+fn is_under_any(rel: &str, prefixes: &[String]) -> bool {
+    prefixes.iter().any(|b| {
+        rel == b
+            || rel
+                .strip_prefix(b.as_str())
+                .is_some_and(|rest| rest.starts_with('/'))
+    })
+}
+
+/// Every ancestor of `rel` (and `rel` itself, for a directory node) must be a real
+/// directory, not a symlink, before restore writes there.
+fn check_real_dirs(root: &Path, rel: &str, node: &Node) -> io::Result<()> {
+    let not_a_dir = |p: &str| {
+        io::Error::other(format!(
+            "{p:?} is not a real directory; refusing to write through it"
+        ))
+    };
+    for (i, _) in rel.match_indices('/') {
+        let ancestor = &rel[..i];
+        if !fs::symlink_metadata(root.join(ancestor)).is_ok_and(|m| m.is_dir()) {
+            return Err(not_a_dir(ancestor));
+        }
+    }
+    if matches!(node, Node::Dir { .. })
+        && let Ok(meta) = fs::symlink_metadata(root.join(rel))
+        && !meta.is_dir()
+    {
+        return Err(not_a_dir(rel));
+    }
+    Ok(())
 }
 
 fn same_type(node: &Node, kind: &Kind) -> bool {
@@ -324,4 +374,33 @@ fn hash_file(path: &Path) -> io::Result<String> {
         hasher.update(&buf[..n]);
     }
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn check_real_dirs_refuses_symlinked_ancestors_and_symlinked_dirs() {
+        let root = tempfile::TempDir::new().unwrap();
+        let outside = tempfile::TempDir::new().unwrap();
+        fs::create_dir(root.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(outside.path(), root.path().join("link")).unwrap();
+        let file = Node::File {
+            hash: "0".repeat(64),
+            size: 0,
+            mode: 0o644,
+            stored: true,
+        };
+        let dir = Node::Dir { mode: 0o755 };
+
+        assert!(check_real_dirs(root.path(), "real/x", &file).is_ok());
+        assert!(check_real_dirs(root.path(), "missing", &dir).is_ok());
+        assert!(check_real_dirs(root.path(), "link/x", &file).is_err());
+        assert!(check_real_dirs(root.path(), "link", &dir).is_err());
+        assert!(
+            check_real_dirs(root.path(), "real/link-later/x", &file).is_err(),
+            "missing ancestor"
+        );
+    }
 }

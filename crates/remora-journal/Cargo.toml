@@ -3,6 +3,7 @@ name = "remora-journal"
 description = "Signed, hash-chained session journal for Remora"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 repository.workspace = true
 homepage.workspace = true
