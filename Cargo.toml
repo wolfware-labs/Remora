@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/remora-snap", "crates/remora-journal"]
+members = ["crates/remora-snap", "crates/remora-journal", "crates/remora-engine"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.89"
 publish = false
 repository = "https://github.com/wolfware-labs/remora"
 homepage = "https://github.com/wolfware-labs/remora"
@@ -24,6 +24,9 @@ ed25519-dalek = "3"
 getrandom = "0.4"
 tempfile = "3"
 proptest = "1"
+dirs = "7"
+remora-snap = { path = "crates/remora-snap" }
+remora-journal = { path = "crates/remora-journal" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
