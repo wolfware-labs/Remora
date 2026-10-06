@@ -110,3 +110,34 @@ fn read_only_open_never_creates_a_missing_journal() {
     assert!(Journal::open_read_only(&db(dir.path())).is_err());
     assert!(!db(dir.path()).exists());
 }
+
+#[test]
+fn a_journal_without_a_version_stamp_is_refused() {
+    // A table with user_version 0: a pre-versioning journal, or one damaged mid-creation.
+    let dir = TempDir::new().unwrap();
+    drop(open(dir.path()));
+    raw_db(dir.path())
+        .execute_batch("PRAGMA user_version = 0")
+        .unwrap();
+
+    assert!(matches!(
+        Journal::open(&db(dir.path()), key()),
+        Err(JournalError::UnsupportedVersion(0))
+    ));
+}
+
+#[test]
+fn concurrent_first_opens_of_a_new_journal_all_succeed() {
+    for _ in 0..20 {
+        let dir = TempDir::new().unwrap();
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| s.spawn(|| Journal::open(&db(dir.path()), key()).map(drop)))
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for r in results {
+            assert!(r.is_ok(), "{r:?}");
+        }
+    }
+}

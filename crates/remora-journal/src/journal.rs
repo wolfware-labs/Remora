@@ -163,17 +163,21 @@ impl Journal {
         };
         private::ensure_file(path).map_err(io_err)?;
         private::tighten_file(path).map_err(io_err)?;
-        let conn = Connection::open(path)?;
-        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        let has_table: bool = conn.query_row(
+        let mut conn = Connection::open(path)?;
+        // Create the table and stamp the version in one IMMEDIATE transaction: a crash (or a
+        // second process opening the same new journal) can never see a table without a version.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version: i64 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let has_table: bool = tx.query_row(
             "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries')",
             [],
             |r| r.get(0),
         )?;
         if version == 0 && !has_table {
-            conn.execute_batch(SCHEMA)?;
-            conn.execute_batch(&format!("PRAGMA user_version = {FORMAT_VERSION}"))?;
+            tx.execute_batch(SCHEMA)?;
+            tx.execute_batch(&format!("PRAGMA user_version = {FORMAT_VERSION}"))?;
         }
+        tx.commit()?;
         check_version(&conn)?;
         Ok(Self { conn, key })
     }
