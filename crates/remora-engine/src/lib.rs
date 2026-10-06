@@ -22,5 +22,5 @@ mod session;
 
 pub use engine::{Engine, default_data_dir, project_id};
 pub use error::EngineError;
-pub use project::Project;
+pub use project::{PointKind, Project, REMORA_AGENT, REWIND_SESSION, RestorePoint, RewindReport, Status};
 pub use session::SessionRef;

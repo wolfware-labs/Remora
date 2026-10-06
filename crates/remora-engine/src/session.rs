@@ -84,3 +84,18 @@ pub(crate) fn remove(path: &Path) -> Result<(), EngineError> {
         Err(e) => Err(io_at(path)(e)),
     }
 }
+
+/// Every open turn in the project, oldest first.
+pub(crate) fn load_all(sessions_dir: &Path) -> Result<Vec<OpenTurn>, EngineError> {
+    let mut turns = Vec::new();
+    for entry in fs::read_dir(sessions_dir).map_err(io_at(sessions_dir))? {
+        let path = entry.map_err(io_at(sessions_dir))?.path();
+        if path.extension().is_some_and(|e| e == "json")
+            && let Some(turn) = load(&path)?
+        {
+            turns.push(turn);
+        }
+    }
+    turns.sort_by(|a, b| (a.started_at_ms, &a.session_id).cmp(&(b.started_at_ms, &b.session_id)));
+    Ok(turns)
+}
