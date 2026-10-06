@@ -380,12 +380,45 @@ impl Project {
             .collect();
 
         let safety = self.take_snapshot()?;
+        // From here on the project may change, so every failure carries the safety
+        // snapshot: the rewind can always be undone.
+        let incomplete = |source: EngineError| EngineError::RewindIncomplete {
+            safety_snapshot: safety.to_string(),
+            source: Box::new(source),
+        };
         let restore = self.snap.restore(&self.root, &point.snapshot);
-        // Journal what really happened, whatever the outcome.
-        let after = self.take_snapshot()?;
-        let changes = self.changes_between(&safety, &after)?;
-        let incomplete = !matches!(&restore, Ok(r) if r.failed.is_empty());
-        let entry = self.journal.append(EntryRecord {
+        let restored_cleanly = matches!(&restore, Ok(r) if r.failed.is_empty());
+        let entry = self.journal_rewind(&safety, point, at_ms, restored_cleanly);
+        match (restore, entry) {
+            (Ok(restore), Ok(entry)) => Ok(RewindReport {
+                restore,
+                safety_snapshot: safety,
+                commands_after,
+                entry,
+            }),
+            (Err(source), _) => Err(incomplete(source.into())),
+            (Ok(_), Err(source)) => Err(incomplete(source)),
+        }
+    }
+
+    /// Journal a rewind with what really changed. If the after-state cannot be read, the
+    /// entry is still written (no changes listed, marked incomplete) so the safety
+    /// snapshot stays reachable as a restore point.
+    fn journal_rewind(
+        &mut self,
+        safety: &SnapshotId,
+        point: &RestorePoint,
+        at_ms: i64,
+        restored_cleanly: bool,
+    ) -> Result<Entry, EngineError> {
+        let observed = self
+            .take_snapshot()
+            .and_then(|after| self.changes_between(safety, &after));
+        let (changes, complete) = match observed {
+            Ok(changes) => (changes, restored_cleanly),
+            Err(_) => (Vec::new(), false),
+        };
+        Ok(self.journal.append(EntryRecord {
             session_id: REWIND_SESSION.to_owned(),
             kind: EntryKind::Rewind,
             agent: REMORA_AGENT.to_owned(),
@@ -397,20 +430,8 @@ impl Project {
             changes,
             interrupted: None,
             rewind_target: Some(point.snapshot.to_string()),
-            incomplete: incomplete.then_some(true),
-        })?;
-        match restore {
-            Ok(restore) => Ok(RewindReport {
-                restore,
-                safety_snapshot: safety,
-                commands_after,
-                entry,
-            }),
-            Err(source) => Err(EngineError::RewindIncomplete {
-                safety_snapshot: safety.to_string(),
-                source,
-            }),
-        }
+            incomplete: (!complete).then_some(true),
+        })?)
     }
 
     pub fn status(&self) -> Result<Status, EngineError> {
@@ -483,7 +504,8 @@ fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), E
         ));
     }
     for cmd in turn.commands {
-        let at_ms = cmd.at_ms.unwrap_or(turn.at_ms);
+        // A clock that went backwards must not move a command before its own turn.
+        let at_ms = cmd.at_ms.unwrap_or(turn.at_ms).max(turn.at_ms);
         if let Some(checkpoint) = &cmd.snapshot_id {
             events.push((
                 at_ms,

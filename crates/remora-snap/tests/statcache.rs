@@ -150,3 +150,24 @@ fn a_damaged_hash_in_the_cache_is_ignored() {
     );
     assert!(snap.manifest(&second.id).is_ok());
 }
+
+#[cfg(unix)]
+#[test]
+fn an_edit_that_restores_an_old_mtime_is_still_caught() {
+    // Tools like `cp -p`, `rsync -a` or `tar` set mtime back to an old value. Size and mtime
+    // then match the cache, but the inode change time does not.
+    let fx = Fixture::new();
+    let path = fx.root().join("a.txt");
+    let old = minutes_ago(10);
+    fx.write("a.txt", "aaaa");
+    set_mtime(&path, old);
+    let snap = fx.snapshotter();
+    let first = snap.snapshot(fx.root()).unwrap();
+
+    fx.write("a.txt", "bbbb");
+    set_mtime(&path, old);
+    let second = snap.snapshot(fx.root()).unwrap();
+
+    assert_ne!(first.id, second.id, "the stale cached hash was trusted");
+    assert_eq!(second.hashed_files, 1);
+}

@@ -490,6 +490,7 @@ dependencies = [
  "proptest",
  "remora-journal",
  "remora-snap",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",

@@ -375,3 +375,59 @@ fn a_point_still_works_after_earlier_events_shift_its_position() {
 
     assert_eq!(fx.read("a.txt"), "v1");
 }
+
+#[test]
+fn a_rewind_whose_journal_write_fails_still_returns_its_undo_snapshot() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "v1");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    fx.write("a.txt", "v2");
+    p.end_turn(&agent(), 2_000).unwrap();
+    let start = p
+        .restore_points()
+        .unwrap()
+        .into_iter()
+        .find(|pt| pt.kind == PointKind::TurnStart)
+        .unwrap();
+    let dir = fx.data.path().join("projects").join(p.id());
+    // Another process holds the journal's write lock (readers still allowed) for longer
+    // than SQLite's busy timeout.
+    let blocker = rusqlite::Connection::open(dir.join("journal.db")).unwrap();
+    blocker.execute_batch("BEGIN IMMEDIATE").unwrap();
+
+    let result = p.rewind(&start, 3_000, false);
+    blocker.execute_batch("ROLLBACK").unwrap();
+
+    let Err(EngineError::RewindIncomplete { safety_snapshot, .. }) = result else {
+        panic!("expected RewindIncomplete, got {result:?}");
+    };
+    assert_eq!(fx.read("a.txt"), "v1", "the restore itself succeeded");
+    let manifest = dir
+        .join("store/manifests")
+        .join(format!("{safety_snapshot}.json"));
+    assert!(
+        manifest.exists(),
+        "the state before the rewind is kept and can be restored"
+    );
+}
+
+#[test]
+fn a_clock_that_went_backwards_never_moves_a_command_before_its_turn() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 2_000).unwrap();
+    p.before_command(&agent(), "git push", 1_000).unwrap(); // the clock jumped back
+    p.end_turn(&agent(), 3_000).unwrap();
+
+    let start = p
+        .restore_points()
+        .unwrap()
+        .into_iter()
+        .find(|pt| pt.kind == PointKind::TurnStart)
+        .unwrap();
+    let report = p.rewind(&start, 4_000, false).unwrap();
+
+    let commands: Vec<_> = report.commands_after.iter().map(|c| c.command.as_str()).collect();
+    assert_eq!(commands, ["git push"]);
+}

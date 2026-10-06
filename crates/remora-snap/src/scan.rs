@@ -22,6 +22,8 @@ pub(crate) enum Kind {
         mtime_ns: Option<u64>,
         /// Inode number on Unix; 0 elsewhere.
         ino: u64,
+        /// Inode change time in nanoseconds on Unix (cannot be set from userspace); 0 elsewhere.
+        ctime_ns: u64,
     },
     Symlink {
         target: String,
@@ -134,6 +136,7 @@ fn classify(entry: &DirEntry) -> Kind {
             mode: platform::mode_of(&meta),
             mtime_ns: platform::mtime_ns(&meta),
             ino: platform::inode(&meta),
+            ctime_ns: platform::ctime_ns(&meta),
         },
         _ => Kind::Unreadable,
     }

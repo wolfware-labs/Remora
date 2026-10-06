@@ -96,6 +96,20 @@ pub(crate) fn inode(_meta: &Metadata) -> u64 {
     0
 }
 
+/// Inode change time in nanoseconds. Unlike mtime it cannot be set by tools such as
+/// `touch`, `cp -p` or `tar`, so it catches an edit that restored an old mtime.
+#[cfg(unix)]
+pub(crate) fn ctime_ns(meta: &Metadata) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    let nanos = i128::from(meta.ctime()) * 1_000_000_000 + i128::from(meta.ctime_nsec());
+    u64::try_from(nanos).unwrap_or(0)
+}
+
+#[cfg(not(unix))]
+pub(crate) fn ctime_ns(_meta: &Metadata) -> u64 {
+    0
+}
+
 /// Remove group/other permissions from an existing directory (Unix); no-op elsewhere.
 #[cfg(unix)]
 pub(crate) fn tighten_dir(path: &Path) -> io::Result<()> {

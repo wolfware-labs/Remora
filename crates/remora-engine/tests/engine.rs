@@ -129,3 +129,31 @@ fn uuid_session_ids_are_accepted() {
     project.begin_turn(&session, None, 1).unwrap();
     assert!(project.end_turn(&session, 2).unwrap().is_some());
 }
+
+#[test]
+fn a_project_folder_that_contains_the_data_dir_is_refused() {
+    // An agent run from $HOME: the default data dir (~/.local/share/remora) is inside it.
+    let home = tempfile::TempDir::new().unwrap();
+    let engine = Engine::open(&home.path().join(".local/share/remora")).unwrap();
+
+    let result = engine.project(home.path());
+
+    assert!(
+        matches!(result, Err(EngineError::RootOverlapsDataDir { .. })),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn a_project_folder_inside_the_data_dir_is_refused() {
+    let fx = Fixture::new();
+    let engine = fx.engine();
+    let inside = fx.data.path().join("projects");
+
+    let result = engine.project(&inside);
+
+    assert!(
+        matches!(result, Err(EngineError::RootOverlapsDataDir { .. })),
+        "{result:?}"
+    );
+}

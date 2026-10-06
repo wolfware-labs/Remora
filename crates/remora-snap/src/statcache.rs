@@ -2,7 +2,8 @@
 //! re-read files that have not changed since the previous snapshot.
 //!
 //! Trust rules (a wrong cache hit would silently snapshot stale content):
-//! - every one of size, mtime (nanoseconds) and inode must match;
+//! - every one of size, mtime (nanoseconds), inode and ctime (Unix) must match: ctime
+//!   cannot be set from userspace, so it catches an edit that restored an old mtime;
 //! - a file modified within [`RACY_WINDOW_NS`] of the snapshot start is always re-read,
 //!   because a second write in the same timestamp tick leaves metadata unchanged
 //!   ("racy timestamps", the same guard git uses), and such a file is never *recorded*
@@ -23,6 +24,7 @@ pub(crate) struct CachedStat {
     pub size: u64,
     pub mtime_ns: u64,
     pub ino: u64,
+    pub ctime_ns: u64,
     pub hash: String,
 }
 
@@ -52,6 +54,7 @@ impl StatCache {
         size: u64,
         mtime_ns: u64,
         ino: u64,
+        ctime_ns: u64,
         started_ns: u64,
     ) -> Option<&str> {
         if is_racy(mtime_ns, started_ns) {
@@ -59,7 +62,7 @@ impl StatCache {
         }
         self.entries
             .get(key)
-            .filter(|c| c.size == size && c.mtime_ns == mtime_ns && c.ino == ino)
+            .filter(|c| c.size == size && c.mtime_ns == mtime_ns && c.ino == ino && c.ctime_ns == ctime_ns)
             .map(|c| c.hash.as_str())
     }
 

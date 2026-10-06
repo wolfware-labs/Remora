@@ -42,10 +42,8 @@ impl Engine {
         let key = load_or_create_key(&data_dir.join("signing.key"))?;
         let projects = data_dir.join("projects");
         fsutil::private_dir(&projects).map_err(io_at(&projects))?;
-        Ok(Self {
-            data_dir: data_dir.to_path_buf(),
-            key,
-        })
+        let data_dir = data_dir.canonicalize().map_err(io_at(data_dir))?;
+        Ok(Self { data_dir, key })
     }
 
     pub fn data_dir(&self) -> &Path {
@@ -60,6 +58,14 @@ impl Engine {
     /// Open (or create) the data for the project rooted at `root`.
     pub fn project(&self, root: &Path) -> Result<Project, EngineError> {
         let root = root.canonicalize().map_err(io_at(root))?;
+        // A project that contains the data directory would snapshot (and rewind) Remora's
+        // own journal, sessions and key; one inside it would rewind other projects' data.
+        if root.starts_with(&self.data_dir) || self.data_dir.starts_with(&root) {
+            return Err(EngineError::RootOverlapsDataDir {
+                root,
+                data_dir: self.data_dir.clone(),
+            });
+        }
         let id = project_id(&root);
         let dir = self.data_dir.join("projects").join(&id);
         fsutil::private_dir(&dir).map_err(io_at(&dir))?;

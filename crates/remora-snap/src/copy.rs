@@ -145,10 +145,11 @@ impl Snapshotter for CopySnapshotter {
                     mode,
                     mtime_ns,
                     ino,
+                    ctime_ns,
                 } => {
                     let key = entry.abs.to_string_lossy().into_owned();
                     let cached = mtime_ns
-                        .and_then(|m| old_cache.lookup(&key, size, m, ino, started_ns))
+                        .and_then(|m| old_cache.lookup(&key, size, m, ino, ctime_ns, started_ns))
                         // A damaged cache must never panic `blob_path` or reach a manifest.
                         .filter(|hash| is_sha256_hex(hash))
                         .filter(|hash| fs::metadata(self.blob_path(hash)).is_ok_and(|b| b.len() == size))
@@ -161,6 +162,7 @@ impl Snapshotter for CopySnapshotter {
                                 size,
                                 mtime_ns,
                                 ino,
+                                ctime_ns,
                                 hash: hash.clone(),
                             },
                         );
@@ -187,6 +189,7 @@ impl Snapshotter for CopySnapshotter {
                                             size,
                                             mtime_ns,
                                             ino,
+                                            ctime_ns,
                                             hash: hash.clone(),
                                         },
                                     );

@@ -27,8 +27,12 @@ pub enum EngineError {
     RewindIncomplete {
         safety_snapshot: String,
         #[source]
-        source: SnapError,
+        source: Box<EngineError>,
     },
+    #[error(
+        "{root} overlaps Remora's data directory {data_dir}; choose a project folder that neither contains it nor lies inside it"
+    )]
+    RootOverlapsDataDir { root: PathBuf, data_dir: PathBuf },
     #[error("another Remora process kept the project locked for too long")]
     LockTimeout,
     #[error("invalid session id {0:?}")]

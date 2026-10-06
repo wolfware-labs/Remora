@@ -159,3 +159,26 @@ fn a_corrupt_session_file_is_set_aside_instead_of_blocking_the_session() {
         "the damaged state is kept as evidence"
     );
 }
+
+#[test]
+fn a_session_file_with_a_bad_snapshot_id_does_not_break_the_project() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("first"), 1_000).unwrap();
+    p.end_turn(&agent(), 1_500).unwrap();
+    let sessions = fx.data.path().join("projects").join(p.id()).join("sessions");
+    let other = remora_engine::SessionRef::new("other", "codex");
+    p.begin_turn(&other, None, 2_000).unwrap();
+    let path = sessions.join("other.json");
+    let damaged = std::fs::read_to_string(&path)
+        .unwrap()
+        .replace("\"pre_snapshot\":\"", "\"pre_snapshot\":\"zz");
+    std::fs::write(&path, damaged).unwrap();
+
+    let points = p.restore_points().unwrap();
+
+    assert_eq!(points.len(), 1, "only the healthy turn's point remains");
+    assert!(p.status().is_ok());
+    assert!(sessions.join("other.json.corrupt").exists());
+    p.rewind(&points[0], 3_000, false).unwrap();
+}

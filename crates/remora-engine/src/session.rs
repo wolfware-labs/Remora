@@ -5,6 +5,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use remora_journal::CommandRecord;
+use remora_snap::SnapshotId;
 use serde::{Deserialize, Serialize};
 
 use crate::error::io_at;
@@ -51,17 +52,31 @@ pub(crate) struct OpenTurn {
     pub commands: Vec<CommandRecord>,
 }
 
+impl OpenTurn {
+    /// Every snapshot id the turn refers to is well formed.
+    fn snapshot_ids_are_valid(&self) -> bool {
+        let valid = |id: &str| SnapshotId::parse(id).is_ok();
+        valid(&self.pre_snapshot)
+            && self
+                .commands
+                .iter()
+                .filter_map(|c| c.snapshot_id.as_deref())
+                .all(valid)
+    }
+}
+
 pub(crate) fn path_for(sessions_dir: &Path, session_id: &str) -> PathBuf {
     sessions_dir.join(format!("{session_id}.json"))
 }
 
 pub(crate) fn load(path: &Path) -> Result<Option<OpenTurn>, EngineError> {
     match fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice(&bytes) {
-            Ok(turn) => Ok(Some(turn)),
-            // A damaged state file must not wedge the session forever: set it aside (kept
-            // as evidence) and carry on as if no turn were open.
-            Err(_) => {
+        Ok(bytes) => match serde_json::from_slice::<OpenTurn>(&bytes) {
+            Ok(turn) if turn.snapshot_ids_are_valid() => Ok(Some(turn)),
+            // A damaged state file (bad JSON or an invalid snapshot id) must not wedge the
+            // session, or break rewind for the whole project: set it aside (kept as
+            // evidence) and carry on as if no turn were open.
+            _ => {
                 let aside = path.with_extension("json.corrupt");
                 fs::rename(path, &aside).map_err(io_at(path))?;
                 Ok(None)
