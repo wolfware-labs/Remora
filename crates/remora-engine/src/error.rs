@@ -21,6 +21,14 @@ pub enum EngineError {
     TurnInProgress { session: String },
     #[error("{0} is not a restore point of this project")]
     UnknownRestorePoint(String),
+    #[error(
+        "the rewind did not finish ({source}); the state before it was kept as snapshot {safety_snapshot}"
+    )]
+    RewindIncomplete {
+        safety_snapshot: String,
+        #[source]
+        source: SnapError,
+    },
     #[error("another Remora process kept the project locked for too long")]
     LockTimeout,
     #[error("invalid session id {0:?}")]

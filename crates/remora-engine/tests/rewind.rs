@@ -124,7 +124,7 @@ fn a_point_that_does_not_match_the_timeline_is_unknown() {
     p.begin_turn(&agent(), None, 1_000).unwrap();
     p.end_turn(&agent(), 2_000).unwrap();
     let mut point = p.restore_points().unwrap()[0].clone();
-    point.position += 7;
+    point.label = Some("never happened".into());
 
     assert!(matches!(
         p.rewind(&point, 3_000, false),
@@ -216,4 +216,162 @@ fn rewinding_twice_in_a_row_is_safe_and_both_are_journaled() {
     assert_eq!(fx.read("a.txt"), "v1");
     assert_eq!((second.restore.written, second.restore.deleted), (0, 0));
     assert_eq!(p.journal().verify().unwrap(), VerifyReport::Intact { entries: 3 });
+}
+
+#[test]
+fn a_point_listed_while_its_turn_was_open_still_works_after_the_turn_ends() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "v1");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    let listed_while_open = p.restore_points().unwrap()[0].clone();
+    fx.write("a.txt", "v2");
+    p.end_turn(&agent(), 2_000).unwrap();
+
+    p.rewind(&listed_while_open, 3_000, false).unwrap();
+
+    assert_eq!(fx.read("a.txt"), "v1");
+}
+
+#[test]
+fn commands_after_include_other_sessions_that_ran_later() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    let a = remora_engine::SessionRef::new("session-a", "claude-code");
+    let b = remora_engine::SessionRef::new("session-b", "codex");
+    p.begin_turn(&a, Some("long task"), 1_000).unwrap(); // still open below
+    p.begin_turn(&b, Some("ship it"), 2_000).unwrap();
+    p.before_command(&b, "git push", 2_100).unwrap();
+    p.end_turn(&b, 3_000).unwrap();
+
+    let a_start = p
+        .restore_points()
+        .unwrap()
+        .into_iter()
+        .find(|pt| pt.kind == PointKind::TurnStart && pt.session_id == "session-a")
+        .unwrap();
+    let report = p.rewind(&a_start, 4_000, true).unwrap();
+
+    let commands: Vec<_> = report.commands_after.iter().map(|c| c.command.as_str()).collect();
+    assert_eq!(commands, ["git push"], "session B pushed after session A started");
+}
+
+#[test]
+fn a_rewind_that_cannot_finish_is_journaled_and_can_be_undone() {
+    use sha2::{Digest, Sha256};
+    let fx = Fixture::new();
+    fx.write("a.txt", "original");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    fx.write("a.txt", "edited");
+    p.end_turn(&agent(), 2_000).unwrap();
+    let start = p
+        .restore_points()
+        .unwrap()
+        .into_iter()
+        .find(|pt| pt.kind == PointKind::TurnStart)
+        .unwrap();
+    // Lose the blob the restore needs.
+    let hash = hex::encode(Sha256::digest(b"original"));
+    let blob = fx
+        .data
+        .path()
+        .join("projects")
+        .join(p.id())
+        .join("store/blobs")
+        .join(&hash[..2])
+        .join(&hash[2..]);
+    std::fs::remove_file(blob).unwrap();
+
+    let result = p.rewind(&start, 3_000, false);
+
+    let Err(EngineError::RewindIncomplete { safety_snapshot, .. }) = result else {
+        panic!("expected RewindIncomplete, got {result:?}");
+    };
+    assert_eq!(fx.read("a.txt"), "edited", "nothing was changed");
+    let last = p.journal().entries().unwrap().pop().unwrap().record;
+    assert_eq!(last.kind, EntryKind::Rewind);
+    assert_eq!(last.incomplete, Some(true));
+    assert_eq!(last.snapshot_id.as_deref(), Some(safety_snapshot.as_str()));
+    let undo = p.restore_points().unwrap();
+    assert!(
+        undo.iter()
+            .any(|pt| pt.kind == PointKind::BeforeRewind && pt.snapshot.as_str() == safety_snapshot)
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_partly_failed_rewind_is_journaled_as_incomplete_with_what_really_changed() {
+    use std::os::unix::fs::PermissionsExt;
+    let fx = Fixture::new();
+    fx.write("locked/a.txt", "v1");
+    fx.write("free.txt", "v1");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    fx.write("locked/a.txt", "v2");
+    fx.write("free.txt", "v2");
+    p.end_turn(&agent(), 2_000).unwrap();
+    let start = p
+        .restore_points()
+        .unwrap()
+        .into_iter()
+        .find(|pt| pt.kind == PointKind::TurnStart)
+        .unwrap();
+    let locked = fx.root().join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(locked.join("probe"), "").is_ok() {
+        return; // running as root: permissions are not enforced
+    }
+
+    let report = p.rewind(&start, 3_000, false).unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        report
+            .restore
+            .failed
+            .iter()
+            .any(|(path, _)| path == "locked/a.txt")
+    );
+    assert_eq!(fx.read("free.txt"), "v1");
+    let entry = &report.entry.record;
+    assert_eq!(entry.incomplete, Some(true));
+    let changed: Vec<_> = entry.changes.iter().map(|c| c.path.as_str()).collect();
+    // free.txt was restored and the locked dir got its snapshotted permissions back; the file
+    // inside it could not be written, so it must not be claimed as changed.
+    assert_eq!(
+        changed,
+        ["free.txt", "locked"],
+        "only what really changed is journaled"
+    );
+}
+
+#[test]
+fn a_point_still_works_after_earlier_events_shift_its_position() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "v1");
+    let mut p = fx.open();
+    let a = remora_engine::SessionRef::new("session-a", "claude-code");
+    let b = remora_engine::SessionRef::new("session-b", "codex");
+    p.begin_turn(&a, Some("later task"), 2_000).unwrap();
+    let listed = p.restore_points().unwrap()[0].clone();
+    fx.write("a.txt", "v2");
+    // A turn that started earlier is journaled afterwards: it sorts before session A's
+    // point, so that point's position moves.
+    p.begin_turn(&b, Some("earlier task"), 1_000).unwrap();
+    p.end_turn(&b, 1_500).unwrap();
+    assert_ne!(
+        p.restore_points()
+            .unwrap()
+            .iter()
+            .find(|pt| pt.session_id == "session-a")
+            .unwrap()
+            .position,
+        listed.position
+    );
+
+    p.rewind(&listed, 3_000, true).unwrap();
+
+    assert_eq!(fx.read("a.txt"), "v1");
 }

@@ -26,13 +26,14 @@ CREATE TABLE IF NOT EXISTS entries (
     changes       TEXT    NOT NULL,
     interrupted   INTEGER,
     rewind_target TEXT,
+    incomplete    INTEGER,
     prev_hash     TEXT    NOT NULL,
     hash          TEXT    NOT NULL,
     signature     TEXT    NOT NULL
 );";
 
 const SELECT_ALL: &str = "SELECT seq, session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
-    prompt, commands, changes, interrupted, rewind_target, prev_hash, hash, signature
+    prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature
     FROM entries ORDER BY seq";
 
 /// A stored journal entry.
@@ -95,6 +96,7 @@ struct RawRow {
     changes: String,
     interrupted: Option<bool>,
     rewind_target: Option<String>,
+    incomplete: Option<bool>,
     prev_hash: String,
     hash: String,
     signature: String,
@@ -115,9 +117,10 @@ impl RawRow {
             changes: row.get(9)?,
             interrupted: row.get(10)?,
             rewind_target: row.get(11)?,
-            prev_hash: row.get(12)?,
-            hash: row.get(13)?,
-            signature: row.get(14)?,
+            incomplete: row.get(12)?,
+            prev_hash: row.get(13)?,
+            hash: row.get(14)?,
+            signature: row.get(15)?,
         })
     }
 
@@ -134,6 +137,7 @@ impl RawRow {
             changes: serde_json::from_str(&self.changes).map_err(|e| e.to_string())?,
             interrupted: self.interrupted,
             rewind_target: self.rewind_target.clone(),
+            incomplete: self.incomplete,
         })
     }
 }
@@ -211,8 +215,8 @@ impl Journal {
         let signature = hex::encode(self.key.sign(&signing_message(&hash)).to_bytes());
         tx.execute(
             "INSERT INTO entries (session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
-                prompt, commands, changes, interrupted, rewind_target, prev_hash, hash, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 record.session_id,
                 record.kind.as_str(),
@@ -225,6 +229,7 @@ impl Journal {
                 serde_json::to_string(&record.changes).expect("changes always serialize"),
                 record.interrupted,
                 record.rewind_target,
+                record.incomplete,
                 prev_hash,
                 hash,
                 signature,

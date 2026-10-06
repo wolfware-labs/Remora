@@ -35,7 +35,7 @@ pub struct RestorePoint {
     pub snapshot: SnapshotId,
     pub kind: PointKind,
     pub session_id: String,
-    /// When the turn (or rewind) this point belongs to started.
+    /// When the point was taken.
     pub at_ms: i64,
     /// The prompt (turn start) or the command (before command) this point precedes.
     pub label: Option<String>,
@@ -191,6 +191,7 @@ impl Project {
             command: command.to_owned(),
             exit_code: None,
             snapshot_id: Some(checkpoint.to_string()),
+            at_ms: Some(at_ms),
         });
         session::save(&path, &turn)?;
         Ok(checkpoint)
@@ -246,6 +247,7 @@ impl Project {
             changes,
             interrupted: interrupted.then_some(true),
             rewind_target: None,
+            incomplete: None,
         })?;
         session::remove(&session::path_for(&self.sessions_dir(), &turn.session_id))?;
         Ok(entry)
@@ -268,14 +270,15 @@ impl Project {
             .collect())
     }
 
-    /// Everything that happened, oldest first: journaled entries, then open turns.
+    /// Everything that happened, ordered by time. Within one turn the order is the order of
+    /// events; at equal times journaled entries come before open turns.
     fn timeline(&self) -> Result<Vec<Item>, EngineError> {
-        let mut items = Vec::new();
+        let mut events: Vec<(i64, Item)> = Vec::new();
         for entry in self.journal.entries()? {
             let r = &entry.record;
             match r.kind {
                 EntryKind::Turn => push_turn(
-                    &mut items,
+                    &mut events,
                     &TurnView {
                         session_id: &r.session_id,
                         at_ms: r.started_at_ms,
@@ -287,23 +290,25 @@ impl Project {
                 )?,
                 EntryKind::Rewind => {
                     if let Some(safety) = &r.snapshot_id {
-                        let position = items.len();
-                        items.push(Item::Point(RestorePoint {
-                            position,
-                            snapshot: SnapshotId::parse(safety)?,
-                            kind: PointKind::BeforeRewind,
-                            session_id: r.session_id.clone(),
-                            at_ms: r.started_at_ms,
-                            label: r.rewind_target.clone(),
-                            open: false,
-                        }));
+                        events.push((
+                            r.started_at_ms,
+                            Item::Point(RestorePoint {
+                                position: 0,
+                                snapshot: SnapshotId::parse(safety)?,
+                                kind: PointKind::BeforeRewind,
+                                session_id: r.session_id.clone(),
+                                at_ms: r.started_at_ms,
+                                label: r.rewind_target.clone(),
+                                open: false,
+                            }),
+                        ));
                     }
                 }
             }
         }
         for turn in session::load_all(&self.sessions_dir())? {
             push_turn(
-                &mut items,
+                &mut events,
                 &TurnView {
                     session_id: &turn.session_id,
                     at_ms: turn.started_at_ms,
@@ -314,11 +319,18 @@ impl Project {
                 },
             )?;
         }
+        // A stable sort: overlapping sessions interleave by time, and each turn keeps its order.
+        events.sort_by_key(|(at_ms, _)| *at_ms);
+        let mut items: Vec<Item> = events.into_iter().map(|(_, item)| item).collect();
+        for (position, item) in items.iter_mut().enumerate() {
+            if let Item::Point(point) = item {
+                point.position = position;
+            }
+        }
         Ok(items)
     }
 
-    /// Every state the project can be rewound to, newest first.
-    pub fn restore_points(&self) -> Result<Vec<RestorePoint>, EngineError> {
+    fn points(&self) -> Result<Vec<RestorePoint>, EngineError> {
         let mut points: Vec<RestorePoint> = self
             .timeline()?
             .into_iter()
@@ -331,8 +343,18 @@ impl Project {
         Ok(points)
     }
 
+    /// Every state the project can be rewound to, newest first.
+    pub fn restore_points(&self) -> Result<Vec<RestorePoint>, EngineError> {
+        let _lock = self.lock()?;
+        self.points()
+    }
+
     /// Restore the project to `point`. Refused while a turn is open, unless `force`.
-    /// A safety snapshot is taken first, so the rewind can itself be undone.
+    ///
+    /// A safety snapshot is taken first and the rewind is always journaled with what
+    /// actually changed, so it can be undone even if the restore fails part-way (the entry
+    /// is then marked `incomplete`, and a hard failure returns
+    /// [`EngineError::RewindIncomplete`] carrying the safety snapshot).
     pub fn rewind(
         &mut self,
         point: &RestorePoint,
@@ -348,11 +370,8 @@ impl Project {
             });
         }
         let timeline = self.timeline()?;
-        let known = matches!(timeline.get(point.position), Some(Item::Point(p)) if p == point);
-        if !known {
-            return Err(EngineError::UnknownRestorePoint(point.snapshot.to_string()));
-        }
-        let commands_after = timeline[point.position + 1..]
+        let index = locate(&timeline, point)?;
+        let commands_after = timeline[index + 1..]
             .iter()
             .filter_map(|item| match item {
                 Item::Command(c) => Some(c.clone()),
@@ -361,8 +380,11 @@ impl Project {
             .collect();
 
         let safety = self.take_snapshot()?;
-        let restore = self.snap.restore(&self.root, &point.snapshot)?;
-        let changes = self.changes_between(&safety, &point.snapshot)?;
+        let restore = self.snap.restore(&self.root, &point.snapshot);
+        // Journal what really happened, whatever the outcome.
+        let after = self.take_snapshot()?;
+        let changes = self.changes_between(&safety, &after)?;
+        let incomplete = !matches!(&restore, Ok(r) if r.failed.is_empty());
         let entry = self.journal.append(EntryRecord {
             session_id: REWIND_SESSION.to_owned(),
             kind: EntryKind::Rewind,
@@ -375,16 +397,24 @@ impl Project {
             changes,
             interrupted: None,
             rewind_target: Some(point.snapshot.to_string()),
+            incomplete: incomplete.then_some(true),
         })?;
-        Ok(RewindReport {
-            restore,
-            safety_snapshot: safety,
-            commands_after,
-            entry,
-        })
+        match restore {
+            Ok(restore) => Ok(RewindReport {
+                restore,
+                safety_snapshot: safety,
+                commands_after,
+                entry,
+            }),
+            Err(source) => Err(EngineError::RewindIncomplete {
+                safety_snapshot: safety.to_string(),
+                source,
+            }),
+        }
     }
 
     pub fn status(&self) -> Result<Status, EngineError> {
+        let _lock = self.lock()?;
         Ok(Status {
             root: self.root.clone(),
             open_sessions: session::load_all(&self.sessions_dir())?
@@ -392,7 +422,7 @@ impl Project {
                 .map(|t| t.session_id)
                 .collect(),
             journal_entries: self.journal.entries()?.len(),
-            restore_points: self.restore_points()?.len(),
+            restore_points: self.points()?.len(),
             last_unprotected: self.last_unprotected.clone(),
         })
     }
@@ -401,6 +431,27 @@ impl Project {
     pub fn journal(&self) -> &Journal {
         &self.journal
     }
+}
+
+/// The same point: everything but its position and whether its turn is still open, both
+/// of which change as other sessions record events or the turn ends.
+fn same_point(a: &RestorePoint, b: &RestorePoint) -> bool {
+    a.snapshot == b.snapshot
+        && a.kind == b.kind
+        && a.session_id == b.session_id
+        && a.at_ms == b.at_ms
+        && a.label == b.label
+}
+
+/// Find `point` in the timeline: at its recorded position if it is still there, else anywhere.
+fn locate(timeline: &[Item], point: &RestorePoint) -> Result<usize, EngineError> {
+    let at = |i: usize| matches!(timeline.get(i), Some(Item::Point(p)) if same_point(p, point));
+    if at(point.position) {
+        return Ok(point.position);
+    }
+    (0..timeline.len())
+        .find(|&i| at(i))
+        .ok_or_else(|| EngineError::UnknownRestorePoint(point.snapshot.to_string()))
 }
 
 /// A turn as the timeline sees it, whether journaled or still open.
@@ -413,31 +464,33 @@ struct TurnView<'a> {
     open: bool,
 }
 
-fn push_turn(items: &mut Vec<Item>, turn: &TurnView<'_>) -> Result<(), EngineError> {
-    let point = |position, snapshot: &str, kind, label: Option<&str>| -> Result<Item, EngineError> {
+fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), EngineError> {
+    let point = |at_ms: i64, snapshot: &str, kind, label: Option<&str>| -> Result<Item, EngineError> {
         Ok(Item::Point(RestorePoint {
-            position,
+            position: 0,
             snapshot: SnapshotId::parse(snapshot)?,
             kind,
             session_id: turn.session_id.to_owned(),
-            at_ms: turn.at_ms,
+            at_ms,
             label: label.map(str::to_owned),
             open: turn.open,
         }))
     };
     if let Some(pre) = turn.pre_snapshot {
-        items.push(point(items.len(), pre, PointKind::TurnStart, turn.prompt)?);
+        events.push((
+            turn.at_ms,
+            point(turn.at_ms, pre, PointKind::TurnStart, turn.prompt)?,
+        ));
     }
     for cmd in turn.commands {
+        let at_ms = cmd.at_ms.unwrap_or(turn.at_ms);
         if let Some(checkpoint) = &cmd.snapshot_id {
-            items.push(point(
-                items.len(),
-                checkpoint,
-                PointKind::BeforeCommand,
-                Some(&cmd.command),
-            )?);
+            events.push((
+                at_ms,
+                point(at_ms, checkpoint, PointKind::BeforeCommand, Some(&cmd.command))?,
+            ));
         }
-        items.push(Item::Command(cmd.clone()));
+        events.push((at_ms, Item::Command(cmd.clone())));
     }
     Ok(())
 }

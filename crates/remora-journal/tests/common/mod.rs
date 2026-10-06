@@ -34,6 +34,7 @@ pub fn record(prompt: &str) -> EntryRecord {
             command: "cargo test".into(),
             exit_code: Some(0),
             snapshot_id: None,
+            at_ms: None,
         }],
         changes: vec![FileChange {
             path: "src/lib.rs".into(),
@@ -41,6 +42,7 @@ pub fn record(prompt: &str) -> EntryRecord {
         }],
         interrupted: None,
         rewind_target: None,
+        incomplete: None,
     }
 }
 

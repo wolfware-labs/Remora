@@ -47,9 +47,11 @@ fn rewind_entries_and_new_fields_round_trip() {
     let mut turn = record("interrupted turn");
     turn.interrupted = Some(true);
     turn.commands[0].snapshot_id = Some("cd".repeat(32));
+    turn.commands[0].at_ms = Some(1_500);
     let mut rewind = record("rewind");
     rewind.kind = EntryKind::Rewind;
     rewind.rewind_target = Some("ef".repeat(32));
+    rewind.incomplete = Some(true);
 
     j.append(turn.clone()).unwrap();
     j.append(rewind.clone()).unwrap();

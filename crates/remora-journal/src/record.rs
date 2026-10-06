@@ -31,6 +31,9 @@ pub struct CommandRecord {
     /// The checkpoint snapshot taken just before the command ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// When the command started (milliseconds since the Unix epoch).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,4 +74,8 @@ pub struct EntryRecord {
     /// For `Rewind` entries: the snapshot that was restored.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rewind_target: Option<String>,
+    /// For `Rewind` entries: the restore did not fully succeed; `changes` lists what
+    /// actually changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete: Option<bool>,
 }

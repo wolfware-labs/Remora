@@ -15,6 +15,7 @@ fn sample() -> EntryRecord {
             command: "rm -rf build".into(),
             exit_code: Some(0),
             snapshot_id: None,
+            at_ms: None,
         }],
         changes: vec![FileChange {
             path: "build/out.o".into(),
@@ -22,6 +23,7 @@ fn sample() -> EntryRecord {
         }],
         interrupted: None,
         rewind_target: None,
+        incomplete: None,
     }
 }
 
@@ -57,8 +59,12 @@ fn optional_fields_change_the_hash_only_when_present() {
     checkpointed.commands[0].snapshot_id = Some("cd".repeat(32));
     let mut rewind = sample();
     rewind.rewind_target = Some("ef".repeat(32));
+    let mut timed = sample();
+    timed.commands[0].at_ms = Some(1_500);
+    let mut incomplete = sample();
+    incomplete.incomplete = Some(true);
 
-    for changed in [interrupted, checkpointed, rewind] {
+    for changed in [interrupted, checkpointed, rewind, timed, incomplete] {
         assert_ne!(compute_hash(GENESIS_HASH, &changed), base);
     }
 }
