@@ -5,7 +5,8 @@
 //! - every one of size, mtime (nanoseconds) and inode must match;
 //! - a file modified within [`RACY_WINDOW_NS`] of the snapshot start is always re-read,
 //!   because a second write in the same timestamp tick leaves metadata unchanged
-//!   ("racy timestamps", the same guard git uses);
+//!   ("racy timestamps", the same guard git uses), and such a file is never *recorded*
+//!   either, or a later snapshot would trust a hash read while the file was still racy;
 //! - the caller only trusts a hit whose blob is present in the store.
 
 use std::collections::BTreeMap;
@@ -53,7 +54,7 @@ impl StatCache {
         ino: u64,
         started_ns: u64,
     ) -> Option<&str> {
-        if mtime_ns.saturating_add(RACY_WINDOW_NS) >= started_ns {
+        if is_racy(mtime_ns, started_ns) {
             return None;
         }
         self.entries
@@ -71,4 +72,10 @@ impl StatCache {
     pub(crate) fn clear_under(&mut self, prefix: &str) {
         self.entries.retain(|k, _| !k.starts_with(prefix));
     }
+}
+
+/// True if a file modified at `mtime_ns` may still be written again within the same
+/// timestamp tick as a snapshot that started at `started_ns`.
+pub(crate) fn is_racy(mtime_ns: u64, started_ns: u64) -> bool {
+    mtime_ns.saturating_add(RACY_WINDOW_NS) >= started_ns
 }

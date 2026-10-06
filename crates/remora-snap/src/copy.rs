@@ -15,8 +15,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use sha2::{Digest, Sha256};
 
 use crate::error::io_at;
+use crate::manifest::is_sha256_hex;
 use crate::scan::{Kind, scan};
-use crate::statcache::{CachedStat, StatCache};
+use crate::statcache::{CachedStat, StatCache, is_racy};
 use crate::{
     Manifest, Node, RecordedOptions, RestoreReport, SnapError, SnapOptions, Snapshot, SnapshotId,
     Snapshotter, platform,
@@ -102,8 +103,8 @@ impl Snapshotter for CopySnapshotter {
             ..Manifest::default()
         };
         let mut unprotected = scanned.non_utf8;
-        // Look up in the cache as it was; build the new one fresh for this root, so entries
-        // for files that no longer exist disappear.
+        // Look up in the cache as it was. The new cache starts from it with this root's
+        // entries dropped and is refilled from this snapshot, so deleted files disappear.
         let old_cache = StatCache::load(&self.statcache_path());
         let mut cache = old_cache.clone();
         cache.clear_under(&format!(
@@ -148,6 +149,8 @@ impl Snapshotter for CopySnapshotter {
                     let key = entry.abs.to_string_lossy().into_owned();
                     let cached = mtime_ns
                         .and_then(|m| old_cache.lookup(&key, size, m, ino, started_ns))
+                        // A damaged cache must never panic `blob_path` or reach a manifest.
+                        .filter(|hash| is_sha256_hex(hash))
                         .filter(|hash| fs::metadata(self.blob_path(hash)).is_ok_and(|b| b.len() == size))
                         .map(str::to_owned);
                     if let Some(hash) = cached {
@@ -172,9 +175,11 @@ impl Snapshotter for CopySnapshotter {
                             Ok(bytes) => {
                                 hashed_files += 1;
                                 let hash = self.put_blob(&bytes)?;
-                                // Only cache what was read if the file did not change since the scan.
+                                // Only cache what was read if the file did not change since the scan, and
+                                // never while it is racy (see `statcache`).
                                 if let Some(mtime_ns) = mtime_ns
                                     && bytes.len() as u64 == size
+                                    && !is_racy(mtime_ns, started_ns)
                                 {
                                     cache.insert(
                                         key,

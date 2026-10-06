@@ -108,3 +108,45 @@ fn deleted_files_drop_out_of_the_cache() {
     let cache = fs::read_to_string(fx.store.path().join("statcache.json")).unwrap();
     assert!(!cache.contains("a.txt"), "{cache}");
 }
+
+#[test]
+fn a_file_still_racy_when_read_is_never_trusted_later() {
+    // Snapshot 1 reads the file within its racy window; the file is then rewritten in the
+    // same timestamp tick (same size, same mtime). Long after, snapshot 2 must not trust
+    // the hash snapshot 1 read.
+    let fx = Fixture::new();
+    let path = fx.root().join("a.txt");
+    fx.write("a.txt", "aaaa");
+    let snap = fx.snapshotter();
+    let first = snap.snapshot(fx.root()).unwrap();
+    let mtime = fs::metadata(&path).unwrap().modified().unwrap();
+    fx.write("a.txt", "bbbb");
+    set_mtime(&path, mtime);
+
+    std::thread::sleep(Duration::from_millis(2_100));
+    let second = snap.snapshot(fx.root()).unwrap();
+
+    assert_ne!(first.id, second.id, "snapshot 2 recorded the stale content");
+    assert_eq!(second.hashed_files, 1);
+}
+
+#[test]
+fn a_damaged_hash_in_the_cache_is_ignored() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "a");
+    set_mtime(&fx.root().join("a.txt"), minutes_ago(5));
+    let snap = fx.snapshotter();
+    snap.snapshot(fx.root()).unwrap();
+    let cache_path = fx.store.path().join("statcache.json");
+    let hash = hex::encode(Sha256::digest(b"a"));
+    let damaged = fs::read_to_string(&cache_path).unwrap().replace(&hash, "a");
+    fs::write(&cache_path, damaged).unwrap();
+
+    let second = snap.snapshot(fx.root()).unwrap();
+
+    assert_eq!(
+        second.hashed_files, 1,
+        "the damaged entry must be ignored and the file read again"
+    );
+    assert!(snap.manifest(&second.id).is_ok());
+}
