@@ -14,11 +14,14 @@ fn sample() -> EntryRecord {
         commands: vec![CommandRecord {
             command: "rm -rf build".into(),
             exit_code: Some(0),
+            snapshot_id: None,
         }],
         changes: vec![FileChange {
             path: "build/out.o".into(),
             kind: FileChangeKind::Deleted,
         }],
+        interrupted: None,
+        rewind_target: None,
     }
 }
 
@@ -41,4 +44,21 @@ fn hash_depends_on_prev_hash_and_content() {
     let c = compute_hash(GENESIS_HASH, &changed);
     assert_ne!(a, b);
     assert_ne!(a, c);
+}
+
+/// The optional fields added after the format was pinned must change the hash when set,
+/// and (see `canonical_hash_is_stable`) leave it untouched when absent.
+#[test]
+fn optional_fields_change_the_hash_only_when_present() {
+    let base = compute_hash(GENESIS_HASH, &sample());
+    let mut interrupted = sample();
+    interrupted.interrupted = Some(true);
+    let mut checkpointed = sample();
+    checkpointed.commands[0].snapshot_id = Some("cd".repeat(32));
+    let mut rewind = sample();
+    rewind.rewind_target = Some("ef".repeat(32));
+
+    for changed in [interrupted, checkpointed, rewind] {
+        assert_ne!(compute_hash(GENESIS_HASH, &changed), base);
+    }
 }

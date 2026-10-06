@@ -1,9 +1,16 @@
 use std::path::Path;
 
-use ed25519_dalek::{Signature, Signer, SigningKey};
-use rusqlite::{Connection, OptionalExtension, Row, TransactionBehavior, params};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavior, params};
 
-use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, key, private};
+use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, private};
+
+/// The on-disk format version, stored in SQLite's `user_version`.
+pub const FORMAT_VERSION: i64 = 1;
+
+/// Signatures cover this prefix followed by the entry hash, so a signature made for
+/// another purpose (or another format version) can never verify as a journal entry.
+const SIGNING_DOMAIN: &[u8] = b"remora-journal-v1\n";
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -17,13 +24,16 @@ CREATE TABLE IF NOT EXISTS entries (
     prompt        TEXT,
     commands      TEXT    NOT NULL,
     changes       TEXT    NOT NULL,
+    interrupted   INTEGER,
+    rewind_target TEXT,
     prev_hash     TEXT    NOT NULL,
     hash          TEXT    NOT NULL,
     signature     TEXT    NOT NULL
 );";
 
 const SELECT_ALL: &str = "SELECT seq, session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
-    prompt, commands, changes, prev_hash, hash, signature FROM entries ORDER BY seq";
+    prompt, commands, changes, interrupted, rewind_target, prev_hash, hash, signature
+    FROM entries ORDER BY seq";
 
 /// A stored journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,7 +42,7 @@ pub struct Entry {
     pub record: EntryRecord,
     pub prev_hash: String,
     pub hash: String,
-    /// Hex-encoded ed25519 signature over `hash`.
+    /// Hex-encoded ed25519 signature over the signing domain plus `hash`.
     pub signature: String,
 }
 
@@ -60,9 +70,15 @@ pub enum VerifyReport {
     },
 }
 
+/// A journal open for appending. Holds the machine's signing key.
 pub struct Journal {
     conn: Connection,
     key: SigningKey,
+}
+
+/// A journal opened read-only, for inspection and verification without the private key.
+pub struct ReadOnlyJournal {
+    conn: Connection,
 }
 
 /// One row as stored, before decoding.
@@ -77,6 +93,8 @@ struct RawRow {
     prompt: Option<String>,
     commands: String,
     changes: String,
+    interrupted: Option<bool>,
+    rewind_target: Option<String>,
     prev_hash: String,
     hash: String,
     signature: String,
@@ -95,9 +113,11 @@ impl RawRow {
             prompt: row.get(7)?,
             commands: row.get(8)?,
             changes: row.get(9)?,
-            prev_hash: row.get(10)?,
-            hash: row.get(11)?,
-            signature: row.get(12)?,
+            interrupted: row.get(10)?,
+            rewind_target: row.get(11)?,
+            prev_hash: row.get(12)?,
+            hash: row.get(13)?,
+            signature: row.get(14)?,
         })
     }
 
@@ -112,24 +132,58 @@ impl RawRow {
             prompt: self.prompt.clone(),
             commands: serde_json::from_str(&self.commands).map_err(|e| e.to_string())?,
             changes: serde_json::from_str(&self.changes).map_err(|e| e.to_string())?,
+            interrupted: self.interrupted,
+            rewind_target: self.rewind_target.clone(),
         })
     }
 }
 
+fn signing_message(hash: &str) -> Vec<u8> {
+    [SIGNING_DOMAIN, hash.as_bytes()].concat()
+}
+
+fn check_version(conn: &Connection) -> Result<(), JournalError> {
+    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if version == FORMAT_VERSION {
+        Ok(())
+    } else {
+        Err(JournalError::UnsupportedVersion(version))
+    }
+}
+
 impl Journal {
-    /// Open (or create) the journal in `dir`: `journal.db` plus `signing.key`.
-    pub fn open(dir: &Path) -> Result<Self, JournalError> {
-        let io_err = |path: &Path| {
-            let path = path.to_path_buf();
-            move |source| JournalError::Io { path, source }
+    /// Open (or create) the journal database at `path`, signing new entries with `key`.
+    ///
+    /// The file is created owner-only; an existing file with loose permissions is tightened.
+    /// A database written by another format version is refused.
+    pub fn open(path: &Path, key: SigningKey) -> Result<Self, JournalError> {
+        let io_err = |source| JournalError::Io {
+            path: path.to_path_buf(),
+            source,
         };
-        private::create_dir_all(dir).map_err(io_err(dir))?;
-        let key = key::load_or_create(&dir.join("signing.key"))?;
-        let db = dir.join("journal.db");
-        private::ensure_file(&db).map_err(io_err(&db))?;
-        let conn = Connection::open(&db)?;
-        conn.execute_batch(SCHEMA)?;
+        private::ensure_file(path).map_err(io_err)?;
+        private::tighten_file(path).map_err(io_err)?;
+        let conn = Connection::open(path)?;
+        let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let has_table: bool = conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'entries')",
+            [],
+            |r| r.get(0),
+        )?;
+        if version == 0 && !has_table {
+            conn.execute_batch(SCHEMA)?;
+            conn.execute_batch(&format!("PRAGMA user_version = {FORMAT_VERSION}"))?;
+        }
+        check_version(&conn)?;
         Ok(Self { conn, key })
+    }
+
+    /// Open an existing journal read-only. Never creates or modifies anything.
+    pub fn open_read_only(path: &Path) -> Result<ReadOnlyJournal, JournalError> {
+        let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let conn = Connection::open_with_flags(path, flags)?;
+        check_version(&conn)?;
+        Ok(ReadOnlyJournal { conn })
     }
 
     /// Hex-encoded public key that verifies this journal's signatures.
@@ -150,11 +204,11 @@ impl Journal {
             .optional()?
             .unwrap_or_else(|| GENESIS_HASH.to_owned());
         let hash = compute_hash(&prev_hash, &record);
-        let signature = hex::encode(self.key.sign(hash.as_bytes()).to_bytes());
+        let signature = hex::encode(self.key.sign(&signing_message(&hash)).to_bytes());
         tx.execute(
             "INSERT INTO entries (session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
-                prompt, commands, changes, prev_hash, hash, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                prompt, commands, changes, interrupted, rewind_target, prev_hash, hash, signature)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 record.session_id,
                 record.kind.as_str(),
@@ -165,6 +219,8 @@ impl Journal {
                 record.prompt,
                 serde_json::to_string(&record.commands).expect("commands always serialize"),
                 serde_json::to_string(&record.changes).expect("changes always serialize"),
+                record.interrupted,
+                record.rewind_target,
                 prev_hash,
                 hash,
                 signature,
@@ -183,68 +239,87 @@ impl Journal {
 
     /// All entries in order.
     pub fn entries(&self) -> Result<Vec<Entry>, JournalError> {
-        let mut stmt = self.conn.prepare(SELECT_ALL)?;
-        let rows = stmt.query_map([], RawRow::from_row)?;
-        let mut out = Vec::new();
-        for row in rows {
-            let row = row?;
-            let record = row
-                .record()
-                .map_err(|detail| JournalError::Corrupt { seq: row.seq, detail })?;
-            out.push(Entry {
-                seq: row.seq,
-                record,
-                prev_hash: row.prev_hash,
-                hash: row.hash,
-                signature: row.signature,
-            });
-        }
-        Ok(out)
+        read_entries(&self.conn)
     }
 
-    /// Walk the chain from the start and report the first broken entry, if any.
-    /// Never modifies the journal: a broken chain is evidence, not something to repair.
+    /// Verify the chain with this journal's own key. See [`ReadOnlyJournal::verify_with`].
     pub fn verify(&self) -> Result<VerifyReport, JournalError> {
-        let verifying_key = self.key.verifying_key();
-        let mut stmt = self.conn.prepare(SELECT_ALL)?;
-        // `seq` is the rowid, so it is always an integer; the other columns may hold any SQLite type.
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, RawRow::from_row(r))))?;
-        let mut expected_prev = GENESIS_HASH.to_owned();
-        let mut count = 0;
-
-        for row in rows {
-            let (seq, parsed) = row?;
-            // A column holding the wrong type (say text in an integer column) is tampering too.
-            let Ok(row) = parsed else {
-                return Ok(VerifyReport::Broken {
-                    seq,
-                    reason: BreakReason::Unparseable,
-                });
-            };
-            let broken = |reason| Ok(VerifyReport::Broken { seq: row.seq, reason });
-            let Ok(record) = row.record() else {
-                return broken(BreakReason::Unparseable);
-            };
-            if row.prev_hash != expected_prev {
-                return broken(BreakReason::ChainBroken);
-            }
-            if compute_hash(&row.prev_hash, &record) != row.hash {
-                return broken(BreakReason::HashMismatch);
-            }
-            let signature_ok = hex::decode(&row.signature)
-                .ok()
-                .and_then(|bytes| <[u8; 64]>::try_from(bytes).ok())
-                .is_some_and(|bytes| {
-                    verifying_key
-                        .verify_strict(row.hash.as_bytes(), &Signature::from_bytes(&bytes))
-                        .is_ok()
-                });
-            if !signature_ok {
-                return broken(BreakReason::BadSignature);
-            }
-            expected_prev = row.hash;
-            count += 1;
-        }
-        Ok(VerifyReport::Intact { entries: count })
+        verify_chain(&self.conn, &self.key.verifying_key())
     }
+}
+
+impl ReadOnlyJournal {
+    /// All entries in order.
+    pub fn entries(&self) -> Result<Vec<Entry>, JournalError> {
+        read_entries(&self.conn)
+    }
+
+    /// Walk the chain from the start and report the first broken entry, if any, checking
+    /// signatures against `key`. Never modifies the journal: a broken chain is evidence.
+    pub fn verify_with(&self, key: &VerifyingKey) -> Result<VerifyReport, JournalError> {
+        verify_chain(&self.conn, key)
+    }
+}
+
+fn read_entries(conn: &Connection) -> Result<Vec<Entry>, JournalError> {
+    let mut stmt = conn.prepare(SELECT_ALL)?;
+    let rows = stmt.query_map([], RawRow::from_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let row = row?;
+        let record = row
+            .record()
+            .map_err(|detail| JournalError::Corrupt { seq: row.seq, detail })?;
+        out.push(Entry {
+            seq: row.seq,
+            record,
+            prev_hash: row.prev_hash,
+            hash: row.hash,
+            signature: row.signature,
+        });
+    }
+    Ok(out)
+}
+
+fn verify_chain(conn: &Connection, verifying_key: &VerifyingKey) -> Result<VerifyReport, JournalError> {
+    let mut stmt = conn.prepare(SELECT_ALL)?;
+    // `seq` is the rowid, so it is always an integer; the other columns may hold any SQLite type.
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, RawRow::from_row(r))))?;
+    let mut expected_prev = GENESIS_HASH.to_owned();
+    let mut count = 0;
+
+    for row in rows {
+        let (seq, parsed) = row?;
+        // A column holding the wrong type (say text in an integer column) is tampering too.
+        let Ok(row) = parsed else {
+            return Ok(VerifyReport::Broken {
+                seq,
+                reason: BreakReason::Unparseable,
+            });
+        };
+        let broken = |reason| Ok(VerifyReport::Broken { seq: row.seq, reason });
+        let Ok(record) = row.record() else {
+            return broken(BreakReason::Unparseable);
+        };
+        if row.prev_hash != expected_prev {
+            return broken(BreakReason::ChainBroken);
+        }
+        if compute_hash(&row.prev_hash, &record) != row.hash {
+            return broken(BreakReason::HashMismatch);
+        }
+        let signature_ok = hex::decode(&row.signature)
+            .ok()
+            .and_then(|bytes| <[u8; 64]>::try_from(bytes).ok())
+            .is_some_and(|bytes| {
+                verifying_key
+                    .verify_strict(&signing_message(&row.hash), &Signature::from_bytes(&bytes))
+                    .is_ok()
+            });
+        if !signature_ok {
+            return broken(BreakReason::BadSignature);
+        }
+        expected_prev = row.hash;
+        count += 1;
+    }
+    Ok(VerifyReport::Intact { entries: count })
 }

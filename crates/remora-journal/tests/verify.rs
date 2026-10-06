@@ -1,48 +1,13 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-use std::path::Path;
+mod common;
 
+use common::{db, journal_with_three, key, raw_db, record};
+use ed25519_dalek::Signer;
 use proptest::prelude::*;
-use remora_journal::{
-    BreakReason, CommandRecord, EntryKind, EntryRecord, FileChange, FileChangeKind, Journal, VerifyReport,
-    compute_hash,
-};
-use rusqlite::{Connection, params};
+use remora_journal::{BreakReason, Journal, SigningKey, VerifyReport, compute_hash};
+use rusqlite::params;
 use tempfile::TempDir;
-
-fn record(prompt: &str) -> EntryRecord {
-    EntryRecord {
-        session_id: "session-1".into(),
-        kind: EntryKind::Turn,
-        agent: "claude-code".into(),
-        started_at_ms: 1_000,
-        ended_at_ms: 2_000,
-        snapshot_id: Some("ab".repeat(32)),
-        prompt: Some(prompt.into()),
-        commands: vec![CommandRecord {
-            command: "cargo test".into(),
-            exit_code: Some(0),
-        }],
-        changes: vec![FileChange {
-            path: "src/lib.rs".into(),
-            kind: FileChangeKind::Modified,
-        }],
-    }
-}
-
-/// Journal with entries "one", "two", "three" (seq 1, 2, 3).
-fn journal_with_three(dir: &Path) -> Journal {
-    let mut j = Journal::open(dir).unwrap();
-    for p in ["one", "two", "three"] {
-        j.append(record(p)).unwrap();
-    }
-    j
-}
-
-/// A second connection that bypasses the Journal API, like an attacker editing the file.
-fn raw_db(dir: &Path) -> Connection {
-    Connection::open(dir.join("journal.db")).unwrap()
-}
 
 #[test]
 fn an_untouched_journal_verifies() {
@@ -54,7 +19,7 @@ fn an_untouched_journal_verifies() {
 #[test]
 fn an_empty_journal_verifies() {
     let dir = TempDir::new().unwrap();
-    let j = Journal::open(dir.path()).unwrap();
+    let j = common::open(dir.path());
     assert_eq!(j.verify().unwrap(), VerifyReport::Intact { entries: 0 });
 }
 
@@ -177,6 +142,48 @@ fn a_malformed_signature_is_a_bad_signature() {
     }
 }
 
+#[test]
+fn a_read_only_journal_verifies_against_a_public_key() {
+    let dir = TempDir::new().unwrap();
+    drop(journal_with_three(dir.path()));
+
+    let reader = Journal::open_read_only(&db(dir.path())).unwrap();
+
+    assert_eq!(reader.entries().unwrap().len(), 3);
+    assert_eq!(
+        reader.verify_with(&key().verifying_key()).unwrap(),
+        VerifyReport::Intact { entries: 3 }
+    );
+    let other = SigningKey::from_bytes(&[9u8; 32]).verifying_key();
+    assert_eq!(
+        reader.verify_with(&other).unwrap(),
+        VerifyReport::Broken {
+            seq: 1,
+            reason: BreakReason::BadSignature
+        }
+    );
+}
+
+#[test]
+fn a_signature_without_the_domain_prefix_is_rejected() {
+    let dir = TempDir::new().unwrap();
+    let j = journal_with_three(dir.path());
+    let hash = j.entries().unwrap()[1].hash.clone();
+    // Sign the bare hash, as a pre-versioning format would have: same key, wrong message.
+    let bare = hex::encode(key().sign(hash.as_bytes()).to_bytes());
+    raw_db(dir.path())
+        .execute("UPDATE entries SET signature = ?1 WHERE seq = 2", params![bare])
+        .unwrap();
+
+    assert_eq!(
+        j.verify().unwrap(),
+        VerifyReport::Broken {
+            seq: 2,
+            reason: BreakReason::BadSignature
+        }
+    );
+}
+
 // --- Review Focus ---
 
 #[test]
@@ -184,7 +191,7 @@ fn a_reopened_journal_still_verifies() {
     let dir = TempDir::new().unwrap();
     drop(journal_with_three(dir.path()));
 
-    let mut j = Journal::open(dir.path()).unwrap();
+    let mut j = common::open(dir.path());
     j.append(record("after restart")).unwrap();
 
     assert_eq!(j.verify().unwrap(), VerifyReport::Intact { entries: 4 });
@@ -193,7 +200,7 @@ fn a_reopened_journal_still_verifies() {
 #[test]
 fn unicode_and_multiline_prompts_verify() {
     let dir = TempDir::new().unwrap();
-    let mut j = Journal::open(dir.path()).unwrap();
+    let mut j = common::open(dir.path());
     j.append(record("borrá el build 🦀\nline two\t\"quoted\"\0nul"))
         .unwrap();
     assert_eq!(j.verify().unwrap(), VerifyReport::Intact { entries: 1 });
@@ -208,7 +215,7 @@ proptest! {
         pick in any::<prop::sample::Index>(),
     ) {
         let dir = TempDir::new().unwrap();
-        let mut j = Journal::open(dir.path()).unwrap();
+        let mut j = common::open(dir.path());
         for p in &prompts {
             j.append(record(p)).unwrap();
         }

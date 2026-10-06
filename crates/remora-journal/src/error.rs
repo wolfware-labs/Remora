@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use crate::journal::FORMAT_VERSION;
+
 #[derive(Debug, thiserror::Error)]
 pub enum JournalError {
     #[error("I/O error at {path}: {source}")]
@@ -16,4 +18,6 @@ pub enum JournalError {
     Random(String),
     #[error("entry {seq} is unreadable: {detail}")]
     Corrupt { seq: i64, detail: String },
+    #[error("journal format version {0} is not supported (expected {FORMAT_VERSION})")]
+    UnsupportedVersion(i64),
 }

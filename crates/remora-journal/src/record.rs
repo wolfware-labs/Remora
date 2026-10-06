@@ -28,6 +28,9 @@ impl EntryKind {
 pub struct CommandRecord {
     pub command: String,
     pub exit_code: Option<i32>,
+    /// The checkpoint snapshot taken just before the command ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub snapshot_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -62,4 +65,10 @@ pub struct EntryRecord {
     pub prompt: Option<String>,
     pub commands: Vec<CommandRecord>,
     pub changes: Vec<FileChange>,
+    /// The turn never saw an end event (for example, the user interrupted the agent).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interrupted: Option<bool>,
+    /// For `Rewind` entries: the snapshot that was restored.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewind_target: Option<String>,
 }
