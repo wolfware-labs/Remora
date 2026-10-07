@@ -45,7 +45,7 @@ impl LogFile {
         let mut file = self.file.lock().unwrap_or_else(PoisonError::into_inner);
         let len = file.metadata()?.len();
         if len > 0 && len + line.len() as u64 + 1 > self.max_bytes {
-            fs::rename(&self.path, self.path.with_extension("log.1"))?;
+            fs::rename(&self.path, rotated(&self.path))?;
             *file = open_append(&self.path)?;
         }
         writeln!(file, "{line}")
@@ -55,6 +55,13 @@ impl LogFile {
     pub fn write_entry(&self, level: &str, message: &str) -> io::Result<()> {
         self.write_line(&format!("{} {level:<5} {message}", utc(SystemClock.now_ms())))
     }
+}
+
+/// `<name>.1` next to `path`: the one previous generation kept.
+fn rotated(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".1");
+    path.with_file_name(name)
 }
 
 fn open_append(path: &Path) -> io::Result<File> {
@@ -158,6 +165,24 @@ mod tests {
             read("remorad.log.1"),
             "second line\n",
             "only one generation is kept"
+        );
+    }
+
+    #[test]
+    fn any_log_name_rotates_to_name_dot_1() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let log = LogFile::open_named(dir.path(), "hook", 10).unwrap();
+
+        log.write_line("first line").unwrap();
+        log.write_line("second line").unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.path().join("hook.1")).unwrap(),
+            "first line\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("hook")).unwrap(),
+            "second line\n"
         );
     }
 

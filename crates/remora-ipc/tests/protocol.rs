@@ -85,9 +85,10 @@ fn every_request_has_a_stable_wire_form() {
             session: "s1".into(),
             agent: "claude-code".into(),
             command: "rm -rf build".into(),
-            tool_use_id: None,
+            tool_use_id: Some("toolu_1".into()),
         },
-        json!({"type": "before_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code", "command": "rm -rf build"}),
+        json!({"type": "before_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code",
+               "command": "rm -rf build", "tool_use_id": "toolu_1"}),
     );
     request(
         Request::AfterCommand {
@@ -95,10 +96,11 @@ fn every_request_has_a_stable_wire_form() {
             session: "s1".into(),
             agent: "claude-code".into(),
             command: "ls".into(),
-            tool_use_id: None,
+            tool_use_id: Some("toolu_1".into()),
             exit_code: Some(2),
         },
-        json!({"type": "after_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code", "command": "ls", "exit_code": 2}),
+        json!({"type": "after_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code",
+               "command": "ls", "tool_use_id": "toolu_1", "exit_code": 2}),
     );
     request(
         Request::EndTurn {
