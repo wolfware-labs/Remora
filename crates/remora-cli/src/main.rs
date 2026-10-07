@@ -39,13 +39,23 @@ enum Agent {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
-    // A hook must never fail the agent: it always exits 0.
+    let cli = match Cli::try_parse() {
+        Ok(cli) => cli,
+        // A hook must never fail the agent, not even with bad arguments: exit code 2 would
+        // block the tool call.
+        Err(e) if std::env::args().any(|arg| arg == "hook") => {
+            let _ = e.print();
+            return ExitCode::SUCCESS;
+        }
+        Err(e) => e.exit(),
+    };
+    // A hook always exits 0, even if it panics.
     if let Command::Hook {
         agent: Agent::ClaudeCode,
     } = cli.command
     {
-        run_hook(cli.data_dir);
+        let data_dir = cli.data_dir;
+        let _ = std::panic::catch_unwind(move || run_hook(data_dir));
         return ExitCode::SUCCESS;
     }
     match run(cli) {

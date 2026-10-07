@@ -22,6 +22,8 @@ pub const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 /// How long any other hook waits for its answer.
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(2);
+/// What a session's marker holds when its turn started where nothing is recorded.
+const NOT_RECORDED: &str = "-";
 /// Session and warning markers older than this are removed.
 const MARKER_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
@@ -70,14 +72,17 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
                 sessions.write(&session, &root.to_string_lossy());
                 root
             }
+            // Remember this too: a later `cd` into another repository must not start
+            // recording a turn that began where the user records nothing.
             Root::Ignored(_) | Root::NotInGit => {
-                sessions.remove(&session);
+                sessions.write(&session, NOT_RECORDED);
                 return None;
             }
         },
-        _ => match sessions.read(&session).map(PathBuf::from) {
-            Some(root) => root,
-            None => match root::resolve(&cwd) {
+        _ => match sessions.read(&session).as_deref() {
+            Some(NOT_RECORDED) => return None,
+            Some(root) if Path::new(root).is_absolute() => PathBuf::from(root),
+            _ => match root::resolve(&cwd) {
                 Root::Repo(root) => root,
                 Root::Ignored(_) | Root::NotInGit => return None,
             },
@@ -87,7 +92,8 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
         event,
         HookEvent::PromptSubmitted { .. } | HookEvent::BeforeBash { .. }
     );
-    if matches!(event, HookEvent::SessionEnded { .. }) {
+    let session_ends = matches!(event, HookEvent::SessionEnded { .. });
+    if session_ends {
         sessions.remove(&session);
     }
     let request = to_request(event, root)?;
@@ -96,10 +102,24 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     } else {
         QUICK_TIMEOUT
     };
-    match connect(env, timeout).and_then(|mut client| client.call(request)) {
+    // One budget for the whole hook: connecting, starting a daemon (twice at most), and
+    // the call itself.
+    let deadline = Instant::now() + 2 * env.start_wait + timeout;
+    let answer = connect(env, timeout, deadline).and_then(|client| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        client
+            .with_timeout(timeout.min(left).max(Duration::from_millis(10)))
+            .call(request)
+    });
+    match answer {
         Ok(_) => None,
         Err(e) => {
             note(&format!("session {session}: {e}"));
+            // Claude Code discards what a SessionEnd hook prints: log it, keep the
+            // once-per-session warning for a hook whose message is seen.
+            if session_ends {
+                return None;
+            }
             let (reason, detail) = describe(&e);
             Markers::new(&env.data_dir, "hook-warnings")
                 .first(&format!("{session}.{reason}"))
@@ -176,25 +196,34 @@ fn system_message(text: &str) -> String {
     serde_json::json!({ "systemMessage": text }).to_string()
 }
 
-/// Connect, starting a daemon if none answers.
-fn connect(env: &HookEnv, timeout: Duration) -> Result<Client, ClientError> {
-    match Client::connect_with_timeout(&env.data_dir, timeout) {
+/// Connect, starting a daemon if none answers (and one more if the first is not up within
+/// `start_wait`). Never waits past `deadline`.
+fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client, ClientError> {
+    let wait = |limit: Duration| {
+        let left = deadline.saturating_duration_since(Instant::now());
+        limit.min(left).max(Duration::from_millis(10))
+    };
+    match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
         Err(ClientError::DaemonNotRunning) => {}
         connected => return connected,
     }
     let Some(remora) = &env.remora else {
         return Err(ClientError::DaemonNotRunning);
     };
-    start_daemon(remora, &env.data_dir)?;
-    let deadline = Instant::now() + env.start_wait;
-    loop {
-        match Client::connect_with_timeout(&env.data_dir, timeout) {
-            Err(ClientError::DaemonNotRunning) if Instant::now() < deadline => {
-                thread::sleep(Duration::from_millis(50));
+    for _ in 0..2 {
+        start_daemon(remora, &env.data_dir)?;
+        let started_by = (Instant::now() + env.start_wait).min(deadline);
+        loop {
+            match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
+                Err(ClientError::DaemonNotRunning) if Instant::now() < started_by => {
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(ClientError::DaemonNotRunning) => break,
+                connected => return connected,
             }
-            connected => return connected,
         }
     }
+    Err(ClientError::DaemonNotRunning)
 }
 
 /// Start `remora daemon` for `data_dir`, detached so it outlives this hook.
@@ -204,6 +233,12 @@ fn start_daemon(remora: &Path, data_dir: &Path) -> Result<(), ClientError> {
         .arg("--data-dir")
         .arg(data_dir)
         .arg("daemon")
+        // Not the agent's folder, which the agent may delete.
+        .current_dir(if data_dir.is_dir() {
+            data_dir.to_path_buf()
+        } else {
+            std::env::temp_dir()
+        })
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -246,7 +281,9 @@ impl Markers {
     }
 
     fn read(&self, key: &str) -> Option<String> {
-        fs::read_to_string(self.path(key)?).ok()
+        fs::read_to_string(self.path(key)?)
+            .ok()
+            .filter(|value| !value.is_empty())
     }
 
     fn write(&self, key: &str, value: &str) {
@@ -264,13 +301,14 @@ impl Markers {
         }
     }
 
-    /// True the first time it is called for `key` (until the marker is pruned).
+    /// True the first time it is called for `key` (until the marker is pruned). False when
+    /// the key cannot be remembered: warning on every event would be worse than not at all.
     fn first(&self, key: &str) -> bool {
         let Some(path) = self.path(key) else {
-            return true;
+            return false;
         };
         if private_dir(&self.dir).is_err() {
-            return true;
+            return false;
         }
         self.prune();
         fs::OpenOptions::new()

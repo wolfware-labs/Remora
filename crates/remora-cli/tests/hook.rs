@@ -205,3 +205,39 @@ fn a_session_end_closes_an_unfinished_turn() {
 
     assert_eq!(h.journal_entries(), 1);
 }
+
+#[test]
+fn a_session_started_outside_git_stays_unrecorded_after_moving_into_a_repository() {
+    let h = Hooks::without_daemon();
+    let outside = tempfile::TempDir::new().unwrap();
+    if outside.path().ancestors().any(|a| a.join(".git").exists()) {
+        return; // the temporary directory itself sits inside a repository
+    }
+    assert_eq!(h.send(&prompt(outside.path(), "hi")), None);
+
+    // The agent then works in a repository: still nothing recorded, so no warning either.
+    let repo = h.setup.repo.path().to_path_buf();
+    assert_eq!(h.send(&before_bash(&repo, "ls", "toolu_1")), None);
+    assert_eq!(h.send(&stop(&repo)), None);
+}
+
+#[test]
+fn a_failed_session_end_shows_nothing_and_keeps_the_warning_for_later() {
+    let h = Hooks::without_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+
+    let end = payload("SessionEnd", &cwd, json!({ "reason": "other" }));
+    assert_eq!(h.send(&end), None, "Claude Code discards SessionEnd output");
+
+    assert!(
+        h.send(&prompt(&cwd, "hi")).is_some(),
+        "the warning is still shown once"
+    );
+}
+
+#[test]
+fn a_hook_with_bad_arguments_still_exits_0() {
+    let s = Setup::new();
+    let out = s.remora_with_input(&["hook", "some-other-agent"], Some("{}"));
+    assert!(out.status.success(), "{out:?}");
+}
