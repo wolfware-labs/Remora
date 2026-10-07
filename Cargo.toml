@@ -31,6 +31,7 @@ tempfile = "3"
 proptest = "1"
 dirs = "7"
 log = { version = "0.4", features = ["std"] }
+interprocess = "2.4"
 remora-snap = { path = "crates/remora-snap" }
 remora-journal = { path = "crates/remora-journal" }
 remora-engine = { path = "crates/remora-engine" }

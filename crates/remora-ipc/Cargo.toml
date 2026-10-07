@@ -16,7 +16,13 @@ remora-journal.workspace = true
 remora-snap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+hex.workspace = true
 thiserror.workspace = true
+interprocess.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true

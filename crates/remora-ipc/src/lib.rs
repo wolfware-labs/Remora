@@ -8,10 +8,17 @@
 //! ← {"v":1,"id":7,"ok":{"type":"snapshot","snapshot":"9ad3…"}}
 //! ← {"v":1,"id":7,"err":{"kind":"turn_in_progress","session":"4f1c","message":"…"}}
 //! ```
+//!
+//! The daemon listens on a socket file inside the data directory (macOS, Linux) or on a
+//! named pipe derived from it (Windows): see [`endpoint`].
 
+mod client;
+mod endpoint;
 mod framing;
 mod protocol;
 
+pub use client::{Client, ClientError, DEFAULT_TIMEOUT};
+pub use endpoint::{Endpoint, endpoint};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
     ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_MESSAGE_BYTES, Outcome, PROTOCOL_VERSION, Request,
