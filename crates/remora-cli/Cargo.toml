@@ -10,6 +10,10 @@ homepage.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "remora"
+path = "src/main.rs"
+
 [dependencies]
 remora-engine.workspace = true
 remora-ipc.workspace = true

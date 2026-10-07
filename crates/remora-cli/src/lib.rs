@@ -4,4 +4,6 @@
 //! forwards its event to the `remorad` daemon and always lets the agent continue.
 
 pub mod claude;
+pub mod commands;
+pub mod hook;
 pub mod root;
