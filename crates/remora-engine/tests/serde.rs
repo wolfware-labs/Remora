@@ -10,7 +10,7 @@ fn restore_points_round_trip_through_json() {
     let fx = Fixture::new();
     let mut p = fx.open();
     p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
-    p.before_command(&agent(), "rm -rf build", 1_100).unwrap();
+    p.before_command(&agent(), "rm -rf build", None, 1_100).unwrap();
 
     for point in p.restore_points().unwrap() {
         let json = serde_json::to_string(&point).unwrap();

@@ -9,7 +9,7 @@ fn status_reports_open_sessions_and_counts() {
     let fx = Fixture::new();
     let mut p = fx.open();
     p.begin_turn(&agent(), None, 1_000).unwrap();
-    p.before_command(&agent(), "ls", 1_100).unwrap();
+    p.before_command(&agent(), "ls", None, 1_100).unwrap();
 
     let status = p.status().unwrap();
 

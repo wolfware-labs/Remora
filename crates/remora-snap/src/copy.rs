@@ -122,9 +122,51 @@ impl Snapshotter for CopySnapshotter {
                     unprotected.push(entry.abs);
                     Node::Opaque
                 }
-                Kind::File { size, mode, .. } if size > self.opts.max_file_bytes => {
-                    match hash_file(&entry.abs) {
-                        Ok(hash) => {
+                Kind::File {
+                    size,
+                    mode,
+                    mtime_ns,
+                    ino,
+                    ctime_ns,
+                } if size > self.opts.max_file_bytes => {
+                    // Too large to store: recorded by hash only. The hash goes through the stat
+                    // cache like any other file's, so an unchanged large file is not re-read on
+                    // every snapshot.
+                    let key = entry.abs.to_string_lossy().into_owned();
+                    let cached = mtime_ns
+                        .and_then(|m| old_cache.lookup(&key, size, m, ino, ctime_ns, started_ns))
+                        .filter(|hash| is_sha256_hex(hash))
+                        .map(str::to_owned);
+                    let hashed = match cached {
+                        Some(hash) => Ok((hash, true)),
+                        None => {
+                            hashed_files += 1;
+                            // Cache it only if the file did not change while it was hashed.
+                            hash_file(&entry.abs).map(|hash| {
+                                let unchanged = fs::metadata(&entry.abs).is_ok_and(|meta| {
+                                    meta.len() == size && platform::mtime_ns(&meta) == mtime_ns
+                                });
+                                (hash, unchanged)
+                            })
+                        }
+                    };
+                    match hashed {
+                        Ok((hash, cacheable)) => {
+                            if let Some(mtime_ns) = mtime_ns
+                                && cacheable
+                                && !is_racy(mtime_ns, started_ns)
+                            {
+                                cache.insert(
+                                    key,
+                                    CachedStat {
+                                        size,
+                                        mtime_ns,
+                                        ino,
+                                        ctime_ns,
+                                        hash: hash.clone(),
+                                    },
+                                );
+                            }
                             unprotected.push(entry.abs);
                             Node::File {
                                 hash,

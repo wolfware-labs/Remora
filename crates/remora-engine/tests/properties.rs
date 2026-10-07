@@ -91,7 +91,7 @@ proptest! {
             }
             for (i, effects) in turn.commands.iter().enumerate() {
                 expected.push(tree(fx.root()));
-                p.before_command(&agent(), &format!("command {i}"), t + 1 + i as i64).unwrap();
+                p.before_command(&agent(), &format!("command {i}"), None, t + 1 + i as i64).unwrap();
                 for op in effects {
                     apply(fx.root(), op);
                 }

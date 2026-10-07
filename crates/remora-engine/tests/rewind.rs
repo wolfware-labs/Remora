@@ -14,7 +14,8 @@ fn rewinding_to_the_checkpoint_before_rm_rf_brings_everything_back() {
     let before = tree(fx.root());
     let mut p = fx.open();
     p.begin_turn(&agent(), Some("clean the repo"), 1_000).unwrap();
-    p.before_command(&agent(), "rm -rf src README.md", 1_100).unwrap();
+    p.before_command(&agent(), "rm -rf src README.md", None, 1_100)
+        .unwrap();
     std::fs::remove_dir_all(fx.root().join("src")).unwrap();
     std::fs::remove_file(fx.root().join("README.md")).unwrap();
     p.end_turn(&agent(), 2_000).unwrap();
@@ -39,10 +40,10 @@ fn rewinding_to_a_turn_start_undoes_the_whole_turn_and_lists_its_commands() {
     fx.write("a.txt", "v1");
     let mut p = fx.open();
     p.begin_turn(&agent(), Some("edit a"), 1_000).unwrap();
-    p.before_command(&agent(), "sed -i s/v1/v2/ a.txt", 1_100)
+    p.before_command(&agent(), "sed -i s/v1/v2/ a.txt", None, 1_100)
         .unwrap();
     fx.write("a.txt", "v2");
-    p.before_command(&agent(), "git push", 1_200).unwrap();
+    p.before_command(&agent(), "git push", None, 1_200).unwrap();
     p.end_turn(&agent(), 2_000).unwrap();
 
     let start = p
@@ -137,7 +138,7 @@ fn restore_points_are_listed_newest_first_with_labels() {
     let fx = Fixture::new();
     let mut p = fx.open();
     p.begin_turn(&agent(), Some("first prompt"), 1_000).unwrap();
-    p.before_command(&agent(), "ls", 1_100).unwrap();
+    p.before_command(&agent(), "ls", None, 1_100).unwrap();
     p.end_turn(&agent(), 2_000).unwrap();
     p.begin_turn(&agent(), Some("second prompt"), 3_000).unwrap();
 
@@ -241,7 +242,7 @@ fn commands_after_include_other_sessions_that_ran_later() {
     let b = remora_engine::SessionRef::new("session-b", "codex");
     p.begin_turn(&a, Some("long task"), 1_000).unwrap(); // still open below
     p.begin_turn(&b, Some("ship it"), 2_000).unwrap();
-    p.before_command(&b, "git push", 2_100).unwrap();
+    p.before_command(&b, "git push", None, 2_100).unwrap();
     p.end_turn(&b, 3_000).unwrap();
 
     let a_start = p
@@ -417,7 +418,7 @@ fn a_clock_that_went_backwards_never_moves_a_command_before_its_turn() {
     let fx = Fixture::new();
     let mut p = fx.open();
     p.begin_turn(&agent(), Some("edit"), 2_000).unwrap();
-    p.before_command(&agent(), "git push", 1_000).unwrap(); // the clock jumped back
+    p.before_command(&agent(), "git push", None, 1_000).unwrap(); // the clock jumped back
     p.end_turn(&agent(), 3_000).unwrap();
 
     let start = p
@@ -430,4 +431,96 @@ fn a_clock_that_went_backwards_never_moves_a_command_before_its_turn() {
 
     let commands: Vec<_> = report.commands_after.iter().map(|c| c.command.as_str()).collect();
     assert_eq!(commands, ["git push"]);
+}
+
+#[test]
+fn a_preview_lists_what_the_rewind_then_changes() {
+    let fx = Fixture::new();
+    fx.write("kept.txt", "same");
+    fx.write("edited.txt", "v1");
+    fx.write("removed.txt", "bye");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    fx.write("edited.txt", "v2");
+    std::fs::remove_file(fx.root().join("removed.txt")).unwrap();
+    fx.write("created.txt", "new");
+    p.before_command(&agent(), "git push", None, 1_500).unwrap();
+    p.end_turn(&agent(), 2_000).unwrap();
+    let start = p
+        .restore_points()
+        .unwrap()
+        .into_iter()
+        .find(|pt| pt.kind == PointKind::TurnStart)
+        .unwrap();
+    let before = common::tree(fx.root());
+
+    let preview = p.preview(&start).unwrap();
+
+    assert_eq!(common::tree(fx.root()), before, "a preview changes nothing");
+    assert_eq!(preview.restore, ["removed.txt"]);
+    assert_eq!(preview.delete, ["created.txt"]);
+    assert_eq!(preview.revert, ["edited.txt"]);
+    let commands: Vec<_> = preview
+        .commands_after
+        .iter()
+        .map(|c| c.command.as_str())
+        .collect();
+    assert_eq!(commands, ["git push"]);
+
+    p.rewind(&start, 3_000, false).unwrap();
+    assert!(fx.exists("removed.txt") && !fx.exists("created.txt"));
+    assert_eq!(fx.read("edited.txt"), "v1");
+}
+
+#[test]
+fn the_safety_snapshot_of_a_rewind_can_be_restored_by_id() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "v1");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    fx.write("a.txt", "v2");
+    p.end_turn(&agent(), 2_000).unwrap();
+    let start = p.restore_points().unwrap().pop().unwrap();
+    let report = p.rewind(&start, 3_000, false).unwrap();
+    assert_eq!(fx.read("a.txt"), "v1");
+
+    let undo = p.restore_snapshot(&report.safety_snapshot, 4_000, false).unwrap();
+
+    assert_eq!(fx.read("a.txt"), "v2");
+    assert_eq!(undo.entry.record.kind, EntryKind::Rewind);
+    assert_eq!(
+        undo.entry.record.rewind_target.as_deref(),
+        Some(report.safety_snapshot.as_str())
+    );
+}
+
+#[test]
+fn restoring_an_unknown_snapshot_is_refused_before_anything_changes() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "v1");
+    let mut p = fx.open();
+    let unknown = remora_snap::SnapshotId::parse(&"0".repeat(64)).unwrap();
+
+    let result = p.restore_snapshot(&unknown, 1_000, false);
+
+    assert!(
+        matches!(result, Err(EngineError::UnknownRestorePoint(_))),
+        "{result:?}"
+    );
+    assert_eq!(fx.read("a.txt"), "v1");
+    assert!(p.journal().entries().unwrap().is_empty());
+}
+
+#[test]
+fn restoring_a_snapshot_is_refused_while_a_turn_is_open() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    let pre = p.begin_turn(&agent(), None, 1_000).unwrap();
+
+    let result = p.restore_snapshot(&pre, 2_000, false);
+
+    assert!(
+        matches!(result, Err(EngineError::TurnInProgress { .. })),
+        "{result:?}"
+    );
 }

@@ -34,6 +34,9 @@ pub struct CommandRecord {
     /// When the command started (milliseconds since the Unix epoch).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at_ms: Option<i64>,
+    /// The agent's id for this tool call, pairing the command with its result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_use_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

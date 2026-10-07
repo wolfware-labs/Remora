@@ -171,3 +171,42 @@ fn an_edit_that_restores_an_old_mtime_is_still_caught() {
     assert_ne!(first.id, second.id, "the stale cached hash was trusted");
     assert_eq!(second.hashed_files, 1);
 }
+
+#[test]
+fn an_unchanged_oversized_file_is_not_hashed_again() {
+    let fx = Fixture::new();
+    fx.write("big.bin", "0123456789-more-than-ten-bytes");
+    set_mtime(&fx.root().join("big.bin"), minutes_ago(5));
+    let snap = fx.snapshotter_with(remora_snap::SnapOptions {
+        max_file_bytes: 10,
+        ..remora_snap::SnapOptions::default()
+    });
+
+    let first = snap.snapshot(fx.root()).unwrap();
+    let second = snap.snapshot(fx.root()).unwrap();
+
+    assert_eq!(first.hashed_files, 1);
+    assert_eq!(second.hashed_files, 0);
+    assert_eq!(first.id, second.id);
+    assert_eq!(second.unprotected.len(), 1, "still reported as not restorable");
+}
+
+#[test]
+fn a_changed_oversized_file_is_hashed_again() {
+    let fx = Fixture::new();
+    let path = fx.root().join("big.bin");
+    fx.write("big.bin", "0123456789-more-than-ten-bytes");
+    set_mtime(&path, minutes_ago(5));
+    let snap = fx.snapshotter_with(remora_snap::SnapOptions {
+        max_file_bytes: 10,
+        ..remora_snap::SnapOptions::default()
+    });
+    let first = snap.snapshot(fx.root()).unwrap();
+
+    fx.write("big.bin", "9876543210-more-than-ten-bytes");
+    set_mtime(&path, minutes_ago(4));
+    let second = snap.snapshot(fx.root()).unwrap();
+
+    assert_eq!(second.hashed_files, 1);
+    assert_ne!(first.id, second.id);
+}

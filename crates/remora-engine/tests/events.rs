@@ -15,9 +15,10 @@ fn a_turn_is_journaled_with_its_commands_and_changes() {
     let mut p = fx.open();
 
     let pre = p.begin_turn(&agent(), Some("tidy up"), 1_000).unwrap();
-    let checkpoint = p.before_command(&agent(), "rm old.txt", 1_100).unwrap();
+    let checkpoint = p.before_command(&agent(), "rm old.txt", None, 1_100).unwrap();
     std::fs::remove_file(fx.root().join("old.txt")).unwrap();
-    p.after_command(&agent(), "rm old.txt", Some(0), 1_200).unwrap();
+    p.after_command(&agent(), "rm old.txt", None, Some(0), 1_200)
+        .unwrap();
     fx.write("new.txt", "new");
     let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
 
@@ -71,7 +72,7 @@ fn a_command_without_a_turn_opens_an_implicit_one() {
     let fx = Fixture::new();
     let mut p = fx.open();
 
-    p.before_command(&agent(), "make", 1_000).unwrap();
+    p.before_command(&agent(), "make", None, 1_000).unwrap();
     let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
 
     assert_eq!(entry.record.prompt, None);
@@ -85,7 +86,7 @@ fn ending_a_turn_that_never_started_does_nothing() {
     let mut p = fx.open();
 
     assert!(p.end_turn(&agent(), 1_000).unwrap().is_none());
-    p.after_command(&agent(), "ls", Some(0), 1_100).unwrap();
+    p.after_command(&agent(), "ls", None, Some(0), 1_100).unwrap();
     assert!(p.journal().entries().unwrap().is_empty());
 }
 
@@ -95,11 +96,11 @@ fn an_open_turn_survives_a_restart() {
     {
         let mut p = fx.open();
         p.begin_turn(&agent(), Some("long task"), 1_000).unwrap();
-        p.before_command(&agent(), "cargo build", 1_100).unwrap();
+        p.before_command(&agent(), "cargo build", None, 1_100).unwrap();
     } // the daemon "restarts" here
 
     let mut p = fx.open();
-    p.after_command(&agent(), "cargo build", Some(101), 1_900)
+    p.after_command(&agent(), "cargo build", None, Some(101), 1_900)
         .unwrap();
     let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
 
@@ -239,4 +240,61 @@ fn long_labels_are_cut_on_restore_points_and_still_identify_them() {
     assert!(label.ends_with('…'));
     p.rewind(&point, 3_000, false).unwrap();
     assert_eq!(fx.read("a.txt"), "v1");
+}
+
+#[test]
+fn results_pair_with_their_command_by_tool_use_id() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), None, 1_000).unwrap();
+    // Two identical commands run in parallel; the first one finishes first, so matching by
+    // text alone would give its result to the second.
+    p.before_command(&agent(), "make test", Some("toolu_a"), 1_100)
+        .unwrap();
+    p.before_command(&agent(), "make test", Some("toolu_b"), 1_200)
+        .unwrap();
+    p.after_command(&agent(), "make test", Some("toolu_a"), Some(2), 1_300)
+        .unwrap();
+    p.after_command(&agent(), "make test", Some("toolu_b"), Some(0), 1_400)
+        .unwrap();
+
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+
+    let results: Vec<_> = entry
+        .record
+        .commands
+        .iter()
+        .map(|c| (c.tool_use_id.as_deref(), c.exit_code))
+        .collect();
+    assert_eq!(results, [(Some("toolu_a"), Some(2)), (Some("toolu_b"), Some(0))]);
+}
+
+#[test]
+fn a_result_for_an_unknown_tool_use_id_changes_nothing() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), None, 1_000).unwrap();
+    p.before_command(&agent(), "ls", Some("toolu_a"), 1_100).unwrap();
+
+    p.after_command(&agent(), "ls", Some("toolu_zzz"), Some(1), 1_200)
+        .unwrap();
+
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+    assert_eq!(entry.record.commands[0].exit_code, None);
+}
+
+#[test]
+fn ending_a_session_closes_its_open_turn_as_interrupted() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("long task"), 1_000).unwrap();
+
+    let entry = p.end_session(&agent(), 2_000).unwrap().unwrap();
+
+    assert_eq!(entry.record.interrupted, Some(true));
+    assert!(p.status().unwrap().open_sessions.is_empty());
+    assert!(
+        p.end_session(&agent(), 3_000).unwrap().is_none(),
+        "nothing left to close"
+    );
 }

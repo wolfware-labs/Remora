@@ -208,6 +208,7 @@ fn every_response_has_a_stable_wire_form() {
                 exit_code: Some(0),
                 snapshot_id: None,
                 at_ms: Some(2_000),
+                tool_use_id: None,
             }],
             commands_omitted: 3,
             seq: 9,

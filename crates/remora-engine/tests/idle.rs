@@ -10,7 +10,7 @@ fn a_turn_idle_since_before_the_cutoff_is_closed_as_interrupted() {
     let fx = Fixture::new();
     let mut p = fx.open();
     p.begin_turn(&agent(), Some("long task"), 1_000).unwrap();
-    p.before_command(&agent(), "cargo build", 5_000).unwrap();
+    p.before_command(&agent(), "cargo build", None, 5_000).unwrap();
 
     assert!(
         p.close_idle_turns(5_000, 9_000).unwrap().is_empty(),
@@ -30,8 +30,9 @@ fn an_exit_code_counts_as_activity() {
     let fx = Fixture::new();
     let mut p = fx.open();
     p.begin_turn(&agent(), None, 1_000).unwrap();
-    p.before_command(&agent(), "cargo build", 1_100).unwrap();
-    p.after_command(&agent(), "cargo build", Some(0), 8_000).unwrap();
+    p.before_command(&agent(), "cargo build", None, 1_100).unwrap();
+    p.after_command(&agent(), "cargo build", None, Some(0), 8_000)
+        .unwrap();
 
     assert!(p.close_idle_turns(8_000, 9_000).unwrap().is_empty());
 }
@@ -43,7 +44,7 @@ fn only_idle_sessions_are_closed() {
     let busy = SessionRef::new("busy", "codex");
     p.begin_turn(&agent(), None, 1_000).unwrap();
     p.begin_turn(&busy, None, 1_000).unwrap();
-    p.before_command(&busy, "make", 7_000).unwrap();
+    p.before_command(&busy, "make", None, 7_000).unwrap();
 
     let closed = p.close_idle_turns(6_000, 9_000).unwrap();
 

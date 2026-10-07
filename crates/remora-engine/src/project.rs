@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use remora_journal::{
     CommandRecord, Entry, EntryKind, EntryRecord, FileChange, FileChangeKind, Journal, SigningKey,
 };
-use remora_snap::{ChangeKind, CopySnapshotter, RestoreReport, SnapOptions, SnapshotId, Snapshotter};
+use remora_snap::{
+    ChangeKind, CopySnapshotter, RestoreReport, SnapError, SnapOptions, SnapshotId, Snapshotter,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::io_at;
@@ -69,6 +71,19 @@ pub struct RewindReport {
     /// (pushes, network calls, database writes) are not undone: review them.
     pub commands_after: Vec<CommandRecord>,
     pub entry: Entry,
+}
+
+/// What a rewind would change (see [`Project::preview`]). Paths are relative to the root.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Preview {
+    /// Absent now, present at the point: brought back.
+    pub restore: Vec<String>,
+    /// Present now, absent at the point: removed.
+    pub delete: Vec<String>,
+    /// Different now: reverted.
+    pub revert: Vec<String>,
+    /// Commands after the point, oldest first: their effects outside the project stay.
+    pub commands_after: Vec<CommandRecord>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -188,6 +203,7 @@ impl Project {
         &mut self,
         session: &SessionRef,
         command: &str,
+        tool_use_id: Option<&str>,
         at_ms: i64,
     ) -> Result<SnapshotId, EngineError> {
         session::check_session_id(&session.id)?;
@@ -211,18 +227,21 @@ impl Project {
             exit_code: None,
             snapshot_id: Some(checkpoint.to_string()),
             at_ms: Some(at_ms),
+            tool_use_id: tool_use_id.map(str::to_owned),
         });
         turn.last_event_ms = Some(at_ms);
         session::save(&path, &turn)?;
         Ok(checkpoint)
     }
 
-    /// A command finished: record its exit code on the matching pending command, and
-    /// note the turn as active. Ignored if no turn is open.
+    /// A command finished: record its exit code on the matching command, and note the turn
+    /// as active. With a `tool_use_id` the command with that id matches; without one, the
+    /// latest pending command with the same text. Ignored if no turn is open.
     pub fn after_command(
         &mut self,
         session: &SessionRef,
         command: &str,
+        tool_use_id: Option<&str>,
         exit_code: Option<i32>,
         at_ms: i64,
     ) -> Result<(), EngineError> {
@@ -230,12 +249,11 @@ impl Project {
         let _lock = self.lock()?;
         let path = session::path_for(&self.sessions_dir(), &session.id);
         if let Some(mut turn) = session::load(&path)? {
-            if let Some(pending) = turn
-                .commands
-                .iter_mut()
-                .rev()
-                .find(|c| c.command == command && c.exit_code.is_none())
-            {
+            let matches = |c: &CommandRecord| match tool_use_id {
+                Some(id) => c.tool_use_id.as_deref() == Some(id),
+                None => c.command == command && c.exit_code.is_none(),
+            };
+            if let Some(pending) = turn.commands.iter_mut().rev().find(|c| matches(c)) {
                 pending.exit_code = exit_code;
             }
             turn.last_event_ms = Some(at_ms);
@@ -251,6 +269,18 @@ impl Project {
         let path = session::path_for(&self.sessions_dir(), &session.id);
         match session::load(&path)? {
             Some(turn) => self.close_turn(turn, at_ms, false).map(Some),
+            None => Ok(None),
+        }
+    }
+
+    /// The agent's session ended: close its open turn, if any, as interrupted (a turn that
+    /// ended normally was already closed by `end_turn`).
+    pub fn end_session(&mut self, session: &SessionRef, at_ms: i64) -> Result<Option<Entry>, EngineError> {
+        session::check_session_id(&session.id)?;
+        let _lock = self.lock()?;
+        let path = session::path_for(&self.sessions_dir(), &session.id);
+        match session::load(&path)? {
+            Some(turn) => self.close_turn(turn, at_ms, true).map(Some),
             None => Ok(None),
         }
     }
@@ -415,23 +445,83 @@ impl Project {
         force: bool,
     ) -> Result<RewindReport, EngineError> {
         let _lock = self.lock()?;
-        if let Some(open) = session::load_all(&self.sessions_dir())?.first()
-            && !force
-        {
-            return Err(EngineError::TurnInProgress {
-                session: open.session_id.clone(),
-            });
+        self.refuse_while_a_turn_is_open(force)?;
+        let commands_after = self.commands_after(point)?;
+        self.restore_to(&point.snapshot, commands_after, at_ms)
+    }
+
+    /// Restore the project to a snapshot by id, for instance the safety snapshot of a
+    /// rewind that did not finish. Journaled like a rewind; refused while a turn is open,
+    /// unless `force`.
+    pub fn restore_snapshot(
+        &mut self,
+        snapshot: &SnapshotId,
+        at_ms: i64,
+        force: bool,
+    ) -> Result<RewindReport, EngineError> {
+        let _lock = self.lock()?;
+        self.refuse_while_a_turn_is_open(force)?;
+        // An unknown id is refused before anything changes.
+        match self.snap.manifest(snapshot) {
+            Ok(_) => {}
+            Err(SnapError::NotFound(_)) => {
+                return Err(EngineError::UnknownRestorePoint(snapshot.to_string()));
+            }
+            Err(e) => return Err(e.into()),
         }
+        self.restore_to(snapshot, Vec::new(), at_ms)
+    }
+
+    /// What rewinding to `point` would change, without changing anything: paths it would
+    /// bring back, remove and revert, and the commands after it that a rewind cannot undo.
+    pub fn preview(&mut self, point: &RestorePoint) -> Result<Preview, EngineError> {
+        let _lock = self.lock()?;
+        let commands_after = self.commands_after(point)?;
+        let now = self.take_snapshot()?;
+        let current = self.snap.manifest(&now)?;
+        let target = self.snap.manifest(&point.snapshot)?;
+        let mut preview = Preview {
+            commands_after,
+            ..Preview::default()
+        };
+        for change in current.diff(&target) {
+            match change.kind {
+                ChangeKind::Added => preview.restore.push(change.path),
+                ChangeKind::Deleted => preview.delete.push(change.path),
+                ChangeKind::Modified => preview.revert.push(change.path),
+            }
+        }
+        Ok(preview)
+    }
+
+    fn refuse_while_a_turn_is_open(&self, force: bool) -> Result<(), EngineError> {
+        match session::load_all(&self.sessions_dir())?.first() {
+            Some(open) if !force => Err(EngineError::TurnInProgress {
+                session: open.session_id.clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    /// The commands recorded after `point`, oldest first.
+    fn commands_after(&self, point: &RestorePoint) -> Result<Vec<CommandRecord>, EngineError> {
         let timeline = self.timeline()?;
         let index = locate(&timeline, point)?;
-        let commands_after = timeline[index + 1..]
+        Ok(timeline[index + 1..]
             .iter()
             .filter_map(|item| match item {
                 Item::Command(c) => Some(c.clone()),
                 Item::Point(_) => None,
             })
-            .collect();
+            .collect())
+    }
 
+    fn restore_to(
+        &mut self,
+        target: &SnapshotId,
+        commands_after: Vec<CommandRecord>,
+        at_ms: i64,
+    ) -> Result<RewindReport, EngineError> {
         let safety = self.take_snapshot()?;
         // From here on the project may change, so every failure carries the safety
         // snapshot: the rewind can always be undone.
@@ -439,9 +529,9 @@ impl Project {
             safety_snapshot: safety.to_string(),
             source: Box::new(source),
         };
-        let restore = self.snap.restore(&self.root, &point.snapshot);
+        let restore = self.snap.restore(&self.root, target);
         let restored_cleanly = matches!(&restore, Ok(r) if r.failed.is_empty());
-        let entry = self.journal_rewind(&safety, point, at_ms, restored_cleanly);
+        let entry = self.journal_rewind(&safety, target, at_ms, restored_cleanly);
         match (restore, entry) {
             (Ok(restore), Ok(entry)) => Ok(RewindReport {
                 restore,
@@ -460,7 +550,7 @@ impl Project {
     fn journal_rewind(
         &mut self,
         safety: &SnapshotId,
-        point: &RestorePoint,
+        target: &SnapshotId,
         at_ms: i64,
         restored_cleanly: bool,
     ) -> Result<Entry, EngineError> {
@@ -482,7 +572,7 @@ impl Project {
             commands: Vec::new(),
             changes,
             interrupted: None,
-            rewind_target: Some(point.snapshot.to_string()),
+            rewind_target: Some(target.to_string()),
             incomplete: (!complete).then_some(true),
         })?)
     }

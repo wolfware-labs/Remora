@@ -21,7 +21,7 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
         Job::BeforeCommand { session, command } => {
             let at = open.at_ms();
             open.project
-                .before_command(&session, &command, at)
+                .before_command(&session, &command, None, at)
                 .map(|snapshot| Response::Snapshot { snapshot })
         }
         Job::AfterCommand {
@@ -31,7 +31,7 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
         } => {
             let at = open.at_ms();
             open.project
-                .after_command(&session, &command, exit_code, at)
+                .after_command(&session, &command, None, exit_code, at)
                 .map(|()| Response::Recorded)
         }
         Job::EndTurn { session } => {

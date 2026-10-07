@@ -16,6 +16,7 @@ fn sample() -> EntryRecord {
             exit_code: Some(0),
             snapshot_id: None,
             at_ms: None,
+            tool_use_id: None,
         }],
         changes: vec![FileChange {
             path: "build/out.o".into(),
