@@ -45,3 +45,21 @@ fn endpoints_differ_per_data_dir() {
         assert_eq!(a, Endpoint::Socket("/data/a/remorad.sock".into()));
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn a_daemon_that_never_answers_times_out_while_connecting() {
+    let data = tempfile::TempDir::new().unwrap();
+    let Endpoint::Socket(path) = endpoint(&data.path().canonicalize().unwrap()) else {
+        panic!("Unix endpoints are socket files");
+    };
+    let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+    let silent = std::thread::spawn(move || listener.accept().map(|(conn, _)| conn));
+
+    let started = std::time::Instant::now();
+    let result = Client::connect_with_timeout(data.path(), std::time::Duration::from_millis(200));
+
+    assert!(matches!(result, Err(ClientError::Timeout(_))), "{result:?}");
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    drop(silent.join().unwrap());
+}

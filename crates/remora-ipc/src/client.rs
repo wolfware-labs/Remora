@@ -53,8 +53,13 @@ pub struct Client {
 }
 
 impl Client {
-    /// Connect to the daemon that owns `data_dir` and exchange versions.
+    /// Connect to the daemon that owns `data_dir` and exchange versions, waiting up to [`DEFAULT_TIMEOUT`] for each answer.
     pub fn connect(data_dir: &Path) -> Result<Self, ClientError> {
+        Self::connect_with_timeout(data_dir, DEFAULT_TIMEOUT)
+    }
+
+    /// Like [`connect`](Self::connect), with `timeout` for the `hello` exchange and every later call.
+    pub fn connect_with_timeout(data_dir: &Path, timeout: Duration) -> Result<Self, ClientError> {
         let data_dir = data_dir
             .canonicalize()
             .map_err(|_| ClientError::DaemonNotRunning)?;
@@ -66,7 +71,7 @@ impl Client {
         let mut client = Self {
             conn: Some(BufReader::new(stream)),
             next_id: 1,
-            timeout: DEFAULT_TIMEOUT,
+            timeout,
             daemon_version: String::new(),
         };
         let hello = Request::Hello {
