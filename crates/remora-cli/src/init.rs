@@ -188,15 +188,39 @@ pub fn update_file(
     let mut text = serde_json::to_string_pretty(&settings).map_err(|e| io_err(&target)(e.into()))?;
     text.push('\n');
     let tmp = target.with_extension("json.remora.tmp");
-    fs::write(&tmp, text).map_err(io_err(&tmp))?;
+    write_private(&tmp, text.as_bytes()).map_err(io_err(&tmp))?;
     if let Some(original) = &original {
-        let backup = target.with_extension("json.remora.bak");
-        fs::write(&backup, original).map_err(io_err(&backup))?;
+        // Settings can hold secrets (an `env` block with tokens): the backup and the new file
+        // are owner-only from the start, then get the original's permissions.
         let permissions = fs::metadata(&target).map_err(io_err(&target))?.permissions();
+        let backup = target.with_extension("json.remora.bak");
+        write_private(&backup, original.as_bytes()).map_err(io_err(&backup))?;
+        fs::set_permissions(&backup, permissions.clone()).map_err(io_err(&backup))?;
         fs::set_permissions(&tmp, permissions).map_err(io_err(&tmp))?;
     }
     fs::rename(&tmp, &target).map_err(io_err(&target))?;
     Ok(true)
+}
+
+/// Write `bytes` to a new `path`, created owner-only (Unix) so nothing can read it before
+/// its permissions are set. A leftover file at `path` is replaced.
+fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    match fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[cfg(test)]

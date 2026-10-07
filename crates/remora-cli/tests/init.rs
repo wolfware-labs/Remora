@@ -177,3 +177,23 @@ fn a_symlinked_settings_file_is_updated_where_it_points() {
     assert_eq!(written, installed(json!({})));
     assert_eq!(fs::metadata(&real).unwrap().permissions().mode() & 0o777, 0o600);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_private_settings_file_stays_private_and_so_does_its_backup() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::TempDir::new().unwrap();
+    let path = write_settings(dir.path(), r#"{ "env": { "API_TOKEN": "secret" } }"#);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+    // A world-readable leftover from an earlier run must not keep its mode.
+    let backup = dir.path().join("settings.json.remora.bak");
+    fs::write(&backup, "old").unwrap();
+    fs::set_permissions(&backup, fs::Permissions::from_mode(0o644)).unwrap();
+
+    update_file(&path, |s| install(s, Path::new(EXE))).unwrap();
+
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&path), 0o600);
+    assert_eq!(mode(&backup), 0o600);
+    assert!(fs::read_to_string(&backup).unwrap().contains("secret"));
+}
