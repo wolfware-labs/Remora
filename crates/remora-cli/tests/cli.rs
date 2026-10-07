@@ -96,8 +96,12 @@ fn a_rewind_while_the_agent_works_is_refused_and_says_why() {
     assert_eq!(refused.status.code(), Some(3), "{}", stderr(&refused));
     let message = stderr(&refused);
     assert!(
-        message.contains("0f8c2b1e") && message.contains("--force"),
+        message.contains("0f8c2b1e") && message.contains("--force") && message.contains("Esc"),
         "{message}"
+    );
+    assert!(
+        !stdout(&refused).contains("Rewind to"),
+        "refused before the preview"
     );
     assert!(s.remora(&["rewind", "1", "--yes", "--force"]).status.success());
 }
@@ -250,4 +254,17 @@ fn a_rewind_that_restores_only_part_of_the_project_fails_and_says_how_to_go_back
         stderr(&out)
     );
     assert_eq!(s.read("free.txt"), "v1", "what could be restored was");
+}
+
+#[test]
+fn a_relative_or_subfolder_root_means_its_repository() {
+    let s = Setup::new();
+    recorded_rm_rf(&s);
+    std::fs::create_dir_all(s.repo.path().join("docs")).unwrap();
+
+    let from_dot = stdout(&s.remora(&["log", "--root", "."]));
+    let from_sub = stdout(&s.remora(&["log", "--root", "docs"]));
+
+    assert!(from_dot.contains("rm -rf src"), "{from_dot}");
+    assert_eq!(from_sub, from_dot);
 }

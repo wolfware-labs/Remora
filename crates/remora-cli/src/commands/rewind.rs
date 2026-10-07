@@ -38,6 +38,10 @@ pub fn run(ctx: &Ctx, root: &Path, target: &Target, yes: bool, force: bool) -> R
         ));
     }
     let mut client = ctx.client()?;
+    // Refuse before showing a preview the user cannot act on.
+    if !force && agent_works(&mut client, root)? {
+        return Err(busy(&mut client, root));
+    }
     let answer = match target {
         Target::Number(n) => {
             let (page, total) = points_page(&mut client, root, n - 1, 1)?;
@@ -103,30 +107,45 @@ pub fn run(ctx: &Ctx, root: &Path, target: &Target, yes: bool, force: bool) -> R
     }
 }
 
+/// Whether a turn is open in the project.
+fn agent_works(client: &mut Client, root: &Path) -> Result<bool, CliError> {
+    match client.call(Request::Status {
+        root: root.to_path_buf(),
+    })? {
+        Response::Status { status } => Ok(!status.open_sessions.is_empty()),
+        other => Err(unexpected(&other)),
+    }
+}
+
+/// The refusal while a turn is open: which sessions, and what to do. Claude Code sends no
+/// end event when the user interrupts it, so an interrupted agent still looks busy.
+fn busy(client: &mut Client, root: &Path) -> CliError {
+    let mut message = String::from("an agent is still working in this project:\n");
+    let now = now_ms();
+    let points = points_page(client, root, 0, remora_ipc::MAX_POINTS)
+        .map(|p| p.0)
+        .unwrap_or_default();
+    for (id, started, last, label) in open_sessions(&points) {
+        let label = label.as_deref().map(|l| one_line(l, 50)).unwrap_or_default();
+        message.push_str(&format!(
+            "  session {}  started {}  ·  last event {}  {label}\n",
+            short_session(&id),
+            ago(now, started),
+            ago(now, last)
+        ));
+    }
+    message
+        .push_str("stop the agent first; if you interrupted it (Esc), it has already stopped: pass --force");
+    CliError::new(EXIT_REFUSED, message)
+}
+
 /// Turn a refused or failed rewind into a message that says what to do.
 fn refusal(client: &mut Client, root: &Path, e: ClientError) -> CliError {
     let ClientError::Daemon(body) = &e else {
         return e.into();
     };
     match &body.kind {
-        ErrorKind::TurnInProgress { .. } => {
-            let mut message = String::from("an agent is still working in this project:\n");
-            let now = now_ms();
-            let points = points_page(client, root, 0, remora_ipc::MAX_POINTS)
-                .map(|p| p.0)
-                .unwrap_or_default();
-            for (id, started, last, label) in open_sessions(&points) {
-                let label = label.as_deref().map(|l| one_line(l, 50)).unwrap_or_default();
-                message.push_str(&format!(
-                    "  session {}  started {}  ·  last event {}  {label}\n",
-                    short_session(&id),
-                    ago(now, started),
-                    ago(now, last)
-                ));
-            }
-            message.push_str("stop the agent first, or pass --force");
-            CliError::new(EXIT_REFUSED, message)
-        }
+        ErrorKind::TurnInProgress { .. } => busy(client, root),
         ErrorKind::RewindIncomplete { safety_snapshot } => CliError::new(
             EXIT_ERROR,
             format!(

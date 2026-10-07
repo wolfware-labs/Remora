@@ -241,3 +241,18 @@ fn a_hook_with_bad_arguments_still_exits_0() {
     let out = s.remora_with_input(&["hook", "some-other-agent"], Some("{}"));
     assert!(out.status.success(), "{out:?}");
 }
+
+#[test]
+fn a_session_end_never_starts_a_daemon() {
+    let h = Hooks::without_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+    let env = h.env(Some(PathBuf::from(common::REMORA)));
+
+    let end = payload("SessionEnd", &cwd, json!({ "reason": "other" }));
+    assert_eq!(run(end.to_string().as_bytes(), &env), None);
+
+    assert!(matches!(
+        Client::connect(h.setup.data.path()),
+        Err(remora_ipc::ClientError::DaemonNotRunning)
+    ));
+}

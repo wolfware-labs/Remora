@@ -20,7 +20,7 @@ pub fn init(ctx: &Ctx, no_service: bool) -> Result<(), CliError> {
     if no_service {
         println!("· login service skipped (--no-service); hooks start the daemon when needed");
     } else {
-        match service::install() {
+        match service::install(ctx) {
             Ok(done) => println!("✓ {done}"),
             Err(e) => println!(
                 "✗ login service not installed: {}\n  hooks still start the daemon when needed",
@@ -41,7 +41,9 @@ pub fn init(ctx: &Ctx, no_service: bool) -> Result<(), CliError> {
         Some(version) => println!("✓ daemon {version} answering"),
         None => println!("· daemon not running yet; the first Claude Code prompt starts it"),
     }
-    println!("Remora now records Claude Code sessions in git repositories. Try `remora status` in one.");
+    println!(
+        "Remora now records new Claude Code sessions in git repositories (restart sessions already running). Try `remora status` in one."
+    );
     Ok(())
 }
 

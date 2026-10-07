@@ -197,7 +197,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
         Command::Verify { project, json } => commands::verify::run(&ctx, &root(&project)?, json),
         Command::Service { action } => match action {
             ServiceAction::Install => {
-                println!("{}", commands::service::install()?);
+                println!("{}", commands::service::install(&ctx)?);
                 Ok(())
             }
             ServiceAction::Uninstall => commands::service::uninstall(&ctx),

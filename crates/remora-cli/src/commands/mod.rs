@@ -78,10 +78,15 @@ impl Ctx {
 /// The project a command works on: `--root`, else the git repository around the current
 /// directory.
 pub fn project_root(explicit: Option<&Path>) -> Result<PathBuf, CliError> {
-    if let Some(root) = explicit {
-        return Ok(root.to_path_buf());
-    }
     let cwd = std::env::current_dir().map_err(|e| CliError::new(EXIT_ERROR, e.to_string()))?;
+    if let Some(root) = explicit {
+        // `--root .` or a subfolder means its repository, like the hooks see it.
+        let absolute = cwd.join(root);
+        return Ok(match root::resolve(&absolute) {
+            Root::Repo(root) | Root::Ignored(root) => root,
+            Root::NotInGit => absolute,
+        });
+    }
     match root::resolve(&cwd) {
         Root::Repo(root) | Root::Ignored(root) => Ok(root),
         Root::NotInGit => Err(CliError::new(

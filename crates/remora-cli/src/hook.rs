@@ -19,7 +19,10 @@ use crate::root::{self, Root};
 /// The most hook input read from stdin.
 pub const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 /// How long a snapshotting hook waits for its answer.
-pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
+/// Claude Code waits 30 s for these hooks (the timeout `remora init` writes); with up to two
+/// daemon starts of 2 s each, 24 s keeps the whole hook inside it. Giving up earlier would let
+/// the command run before its restore point exists.
+pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(24);
 /// How long any other hook waits for its answer.
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(2);
 /// What a session's marker holds when its turn started where nothing is recorded.
@@ -97,6 +100,11 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
         sessions.remove(&session);
     }
     let request = to_request(event, root)?;
+    // Starting a daemon when a session ends only makes Claude Code wait on exit.
+    let env = &HookEnv {
+        remora: if session_ends { None } else { env.remora.clone() },
+        ..env.clone()
+    };
     let timeout = if snapshots {
         SNAPSHOT_TIMEOUT
     } else {
@@ -181,7 +189,11 @@ fn describe(error: &ClientError) -> (&'static str, String) {
             "daemon",
             "the Remora daemon is not running and could not be started".to_owned(),
         ),
-        ClientError::Timeout(_) => ("timeout", "the Remora daemon did not answer in time".to_owned()),
+        ClientError::Timeout(_) => (
+            "timeout",
+            "the Remora daemon did not answer in time (a first snapshot of a large project can be slow), so this restore point may be missing or late"
+                .to_owned(),
+        ),
         ClientError::Daemon(body) if body.kind == ErrorKind::VersionMismatch => (
             "version",
             "this remora and the running daemon are different versions (run `remora service install`)"

@@ -18,13 +18,16 @@ pub fn find_remorad() -> Option<PathBuf> {
 }
 
 /// `remora service install`: start `remorad` at login, and now.
-pub fn install() -> Result<String, CliError> {
+pub fn install(ctx: &Ctx) -> Result<String, CliError> {
     let remorad = find_remorad().ok_or_else(|| {
         CliError::new(
             EXIT_ERROR,
             "remorad was not found next to remora or on PATH; install it alongside remora",
         )
     })?;
+    // A daemon a hook started (or an older version) holds the instance lock: the service's
+    // own daemon would exit with "already running". Stop it first, on every OS.
+    remora_ipc::stop_daemon(&ctx.data_dir, Duration::from_secs(10))?;
     service::install(&remorad).map_err(|e| CliError::new(EXIT_ERROR, e.to_string()))
 }
 
