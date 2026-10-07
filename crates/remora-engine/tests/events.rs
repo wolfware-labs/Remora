@@ -17,7 +17,7 @@ fn a_turn_is_journaled_with_its_commands_and_changes() {
     let pre = p.begin_turn(&agent(), Some("tidy up"), 1_000).unwrap();
     let checkpoint = p.before_command(&agent(), "rm old.txt", 1_100).unwrap();
     std::fs::remove_file(fx.root().join("old.txt")).unwrap();
-    p.after_command(&agent(), "rm old.txt", Some(0)).unwrap();
+    p.after_command(&agent(), "rm old.txt", Some(0), 1_200).unwrap();
     fx.write("new.txt", "new");
     let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
 
@@ -85,7 +85,7 @@ fn ending_a_turn_that_never_started_does_nothing() {
     let mut p = fx.open();
 
     assert!(p.end_turn(&agent(), 1_000).unwrap().is_none());
-    p.after_command(&agent(), "ls", Some(0)).unwrap();
+    p.after_command(&agent(), "ls", Some(0), 1_100).unwrap();
     assert!(p.journal().entries().unwrap().is_empty());
 }
 
@@ -99,7 +99,8 @@ fn an_open_turn_survives_a_restart() {
     } // the daemon "restarts" here
 
     let mut p = fx.open();
-    p.after_command(&agent(), "cargo build", Some(101)).unwrap();
+    p.after_command(&agent(), "cargo build", Some(101), 1_900)
+        .unwrap();
     let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
 
     assert_eq!(entry.record.prompt.as_deref(), Some("long task"));
@@ -181,4 +182,20 @@ fn a_session_file_with_a_bad_snapshot_id_does_not_break_the_project() {
     assert!(p.status().is_ok());
     assert!(sessions.join("other.json.corrupt").exists());
     p.rewind(&points[0], 3_000, false).unwrap();
+}
+
+#[test]
+fn a_second_damaged_session_file_keeps_the_first_as_evidence() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    let sessions = fx.data.path().join("projects").join(p.id()).join("sessions");
+    for (i, at) in [(1, 1_000), (2, 2_000)] {
+        p.begin_turn(&agent(), None, at).unwrap();
+        std::fs::write(sessions.join("session-1.json"), format!("damaged {i}")).unwrap();
+        p.status().unwrap(); // reading the state sets the damaged file aside
+    }
+
+    let first = std::fs::read_to_string(sessions.join("session-1.json.corrupt")).unwrap();
+    let second = std::fs::read_to_string(sessions.join("session-1.json.corrupt.1")).unwrap();
+    assert_eq!((first.as_str(), second.as_str()), ("damaged 1", "damaged 2"));
 }

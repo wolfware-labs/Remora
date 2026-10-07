@@ -4,6 +4,7 @@ use remora_journal::{
     CommandRecord, Entry, EntryKind, EntryRecord, FileChange, FileChangeKind, Journal, SigningKey,
 };
 use remora_snap::{ChangeKind, CopySnapshotter, RestoreReport, SnapOptions, SnapshotId, Snapshotter};
+use serde::{Deserialize, Serialize};
 
 use crate::error::io_at;
 use crate::lock::ProjectLock;
@@ -16,7 +17,8 @@ pub const REWIND_SESSION: &str = "remora-rewind";
 /// The agent name recorded on rewind entries and on turns opened implicitly.
 pub const REMORA_AGENT: &str = "remora";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PointKind {
     /// Before a turn changed anything.
     TurnStart,
@@ -27,7 +29,7 @@ pub enum PointKind {
 }
 
 /// A state the project can be rewound to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestorePoint {
     /// Position in the project's timeline; identifies the point unambiguously even when
     /// two points share a snapshot (identical trees).
@@ -54,7 +56,7 @@ pub struct RewindReport {
     pub entry: Entry,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
     pub root: PathBuf,
     pub open_sessions: Vec<String>,
@@ -159,6 +161,7 @@ impl Project {
             started_at_ms: at_ms,
             pre_snapshot: pre.to_string(),
             commands: Vec::new(),
+            last_event_ms: Some(at_ms),
         };
         session::save(&path, &turn)?;
         Ok(pre)
@@ -185,6 +188,7 @@ impl Project {
                 started_at_ms: at_ms,
                 pre_snapshot: checkpoint.to_string(),
                 commands: Vec::new(),
+                last_event_ms: None,
             },
         };
         turn.commands.push(CommandRecord {
@@ -193,28 +197,33 @@ impl Project {
             snapshot_id: Some(checkpoint.to_string()),
             at_ms: Some(at_ms),
         });
+        turn.last_event_ms = Some(at_ms);
         session::save(&path, &turn)?;
         Ok(checkpoint)
     }
 
-    /// A command finished: record its exit code. Ignored if no matching command is pending.
+    /// A command finished: record its exit code on the matching pending command, and
+    /// note the turn as active. Ignored if no turn is open.
     pub fn after_command(
         &mut self,
         session: &SessionRef,
         command: &str,
         exit_code: Option<i32>,
+        at_ms: i64,
     ) -> Result<(), EngineError> {
         session::check_session_id(&session.id)?;
         let _lock = self.lock()?;
         let path = session::path_for(&self.sessions_dir(), &session.id);
-        if let Some(mut turn) = session::load(&path)?
-            && let Some(pending) = turn
+        if let Some(mut turn) = session::load(&path)? {
+            if let Some(pending) = turn
                 .commands
                 .iter_mut()
                 .rev()
                 .find(|c| c.command == command && c.exit_code.is_none())
-        {
-            pending.exit_code = exit_code;
+            {
+                pending.exit_code = exit_code;
+            }
+            turn.last_event_ms = Some(at_ms);
             session::save(&path, &turn)?;
         }
         Ok(())
@@ -229,6 +238,19 @@ impl Project {
             Some(turn) => self.close_turn(turn, at_ms, false).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Close, as interrupted, every open turn with no event since `idle_before_ms`: an agent
+    /// that was interrupted never sends its end event. Returns the journaled entries.
+    pub fn close_idle_turns(&mut self, idle_before_ms: i64, at_ms: i64) -> Result<Vec<Entry>, EngineError> {
+        let _lock = self.lock()?;
+        let mut closed = Vec::new();
+        for turn in session::load_all(&self.sessions_dir())? {
+            if turn.last_activity_ms() < idle_before_ms {
+                closed.push(self.close_turn(turn, at_ms, true)?);
+            }
+        }
+        Ok(closed)
     }
 
     fn close_turn(&mut self, turn: OpenTurn, at_ms: i64, interrupted: bool) -> Result<Entry, EngineError> {

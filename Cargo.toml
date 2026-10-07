@@ -25,6 +25,7 @@ getrandom = "0.4"
 tempfile = "3"
 proptest = "1"
 dirs = "7"
+log = { version = "0.4", features = ["std"] }
 remora-snap = { path = "crates/remora-snap" }
 remora-journal = { path = "crates/remora-journal" }
 

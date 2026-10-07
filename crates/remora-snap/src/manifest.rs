@@ -6,8 +6,25 @@ use serde::{Deserialize, Serialize};
 use crate::SnapError;
 
 /// Content address of a manifest: 64 lowercase hex characters (SHA-256).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+///
+/// It (de)serializes as a plain string; deserializing validates it like [`SnapshotId::parse`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
 pub struct SnapshotId(String);
+
+impl TryFrom<String> for SnapshotId {
+    type Error = SnapError;
+
+    fn try_from(s: String) -> Result<Self, SnapError> {
+        Self::parse(&s)
+    }
+}
+
+impl From<SnapshotId> for String {
+    fn from(id: SnapshotId) -> String {
+        id.0
+    }
+}
 
 impl SnapshotId {
     /// Parse an id. Rejects anything that is not 64 lowercase hex characters,

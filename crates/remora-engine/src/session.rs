@@ -50,9 +50,20 @@ pub(crate) struct OpenTurn {
     /// The snapshot taken before the turn changed anything.
     pub pre_snapshot: String,
     pub commands: Vec<CommandRecord>,
+    /// When the turn last saw an event. Absent in files written before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_event_ms: Option<i64>,
 }
 
 impl OpenTurn {
+    /// The time of the turn's latest known event.
+    pub(crate) fn last_activity_ms(&self) -> i64 {
+        let commands = self.commands.iter().filter_map(|c| c.at_ms);
+        commands
+            .chain(self.last_event_ms)
+            .fold(self.started_at_ms, i64::max)
+    }
+
     /// Every snapshot id the turn refers to is well formed.
     fn snapshot_ids_are_valid(&self) -> bool {
         let valid = |id: &str| SnapshotId::parse(id).is_ok();
@@ -77,14 +88,26 @@ pub(crate) fn load(path: &Path) -> Result<Option<OpenTurn>, EngineError> {
             // session, or break rewind for the whole project: set it aside (kept as
             // evidence) and carry on as if no turn were open.
             _ => {
-                let aside = path.with_extension("json.corrupt");
+                let aside = unused_aside_path(path);
                 fs::rename(path, &aside).map_err(io_at(path))?;
+                log::warn!("set aside a damaged session file as {}", aside.display());
                 Ok(None)
             }
         },
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(io_at(path)(e)),
     }
+}
+
+/// `<name>.json.corrupt`, or `.corrupt.1`, `.corrupt.2`, ... so earlier evidence is kept.
+fn unused_aside_path(path: &Path) -> PathBuf {
+    let mut aside = path.with_extension("json.corrupt");
+    let mut n = 1;
+    while fs::symlink_metadata(&aside).is_ok() {
+        aside = path.with_extension(format!("json.corrupt.{n}"));
+        n += 1;
+    }
+    aside
 }
 
 pub(crate) fn save(path: &Path, turn: &OpenTurn) -> Result<(), EngineError> {
