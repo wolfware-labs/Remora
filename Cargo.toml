@@ -1,6 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/remora-snap", "crates/remora-journal", "crates/remora-engine"]
+members = [
+    "crates/remora-snap",
+    "crates/remora-journal",
+    "crates/remora-engine",
+    "crates/remora-ipc",
+]
 
 [workspace.package]
 version = "0.1.0"
@@ -28,6 +33,7 @@ dirs = "7"
 log = { version = "0.4", features = ["std"] }
 remora-snap = { path = "crates/remora-snap" }
 remora-journal = { path = "crates/remora-journal" }
+remora-engine = { path = "crates/remora-engine" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -1,0 +1,22 @@
+[package]
+name = "remora-ipc"
+description = "Remora's daemon protocol: message types, framing and client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+remora-engine.workspace = true
+remora-journal.workspace = true
+remora-snap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true

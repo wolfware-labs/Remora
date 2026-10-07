@@ -507,6 +507,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "remora-ipc"
+version = "0.1.0"
+dependencies = [
+ "remora-engine",
+ "remora-journal",
+ "remora-snap",
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "remora-journal"
 version = "0.1.0"
 dependencies = [
