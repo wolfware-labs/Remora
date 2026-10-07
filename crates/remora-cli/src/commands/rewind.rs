@@ -84,7 +84,19 @@ pub fn run(ctx: &Ctx, root: &Path, target: &Target, yes: bool, force: bool) -> R
     match answer {
         Ok(Response::Rewound(rewound)) => {
             print_rewound(&rewound);
-            Ok(())
+            if rewound.failed.is_empty() {
+                Ok(())
+            } else {
+                // Only part of the project was restored: say so in the exit code too.
+                Err(CliError::new(
+                    EXIT_ERROR,
+                    format!(
+                        "{} paths could not be restored (listed above); your files from before the rewind are kept: `remora rewind --snapshot {}` brings them back",
+                        rewound.failed.len(),
+                        rewound.safety_snapshot
+                    ),
+                ))
+            }
         }
         Ok(other) => Err(unexpected(&other)),
         Err(e) => Err(refusal(&mut client, root, e)),

@@ -11,7 +11,7 @@ use common::{REMORA, Setup, stderr, stdout};
 
 #[test]
 fn a_real_claude_code_session_is_recorded_and_rewound() {
-    if std::env::var_os("REMORA_TEST_CLAUDE").is_none() {
+    if std::env::var("REMORA_TEST_CLAUDE").as_deref() != Ok("1") {
         return;
     }
     let s = Setup::new();

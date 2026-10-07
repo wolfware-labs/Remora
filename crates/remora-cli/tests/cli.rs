@@ -216,3 +216,38 @@ fn hooks_always_exit_0() {
     assert!(out.status.success());
     assert!(out.stdout.is_empty());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_rewind_that_restores_only_part_of_the_project_fails_and_says_how_to_go_back() {
+    use std::os::unix::fs::PermissionsExt;
+    let s = Setup::new();
+    let cwd = s.repo.path().to_path_buf();
+    s.write("locked/a.txt", "v1");
+    s.write("free.txt", "v1");
+    s.hook(&prompt(&cwd, "edit both"));
+    s.write("locked/a.txt", "v2");
+    s.write("free.txt", "v2");
+    s.hook(&stop(&cwd));
+    let locked = cwd.join("locked");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    if std::fs::write(locked.join("probe"), "").is_ok() {
+        return; // running as root: permissions are not enforced
+    }
+
+    let out = s.remora(&["rewind", "1", "--yes"]);
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert_eq!(out.status.code(), Some(1), "{}", stdout(&out));
+    assert!(
+        stdout(&out).contains("could not restore locked/a.txt"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(
+        stderr(&out).contains("remora rewind --snapshot"),
+        "{}",
+        stderr(&out)
+    );
+    assert_eq!(s.read("free.txt"), "v1", "what could be restored was");
+}
