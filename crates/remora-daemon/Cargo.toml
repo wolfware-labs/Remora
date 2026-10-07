@@ -1,0 +1,29 @@
+[package]
+name = "remora-daemon"
+description = "remorad: the per-user Remora daemon that owns the engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+remora-engine.workspace = true
+remora-ipc.workspace = true
+remora-journal.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+interprocess.workspace = true
+log.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+widestring.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

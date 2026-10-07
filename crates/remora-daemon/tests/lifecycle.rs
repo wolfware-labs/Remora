@@ -1,0 +1,155 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
+mod common;
+
+use std::time::Duration;
+
+use common::{START_MS, TestDaemon, config};
+use remora_daemon::{Daemon, DaemonError};
+use remora_ipc::{Client, ClientError, ErrorKind, Request, Response};
+
+#[test]
+fn a_turn_idle_for_31_minutes_is_closed_as_interrupted() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", Some("interrupted by the user"));
+
+    d.clock.advance(Duration::from_secs(29 * 60));
+    d.daemon.sweep();
+    assert_eq!(
+        d.status(&mut client).open_sessions,
+        ["s1"],
+        "29 minutes is not stale yet"
+    );
+
+    d.clock.advance(Duration::from_secs(2 * 60));
+    d.daemon.sweep();
+    let status = d.status(&mut client);
+    assert!(status.open_sessions.is_empty());
+    assert_eq!(status.journal_entries, 1);
+}
+
+#[test]
+fn turns_left_open_before_a_restart_are_closed_when_their_project_is_used() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+    drop(client);
+    d.stop();
+
+    d.clock.advance(Duration::from_secs(45 * 60));
+    let restarted = Daemon::start(config(d.data.path(), &d.clock)).unwrap();
+    let mut client = Client::connect(d.data.path()).unwrap();
+    let status = d.status(&mut client);
+    restarted.shutdown();
+    restarted.wait();
+
+    assert!(status.open_sessions.is_empty());
+    assert_eq!(status.journal_entries, 1);
+}
+
+#[test]
+fn event_times_never_go_backwards() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+    d.clock.set(START_MS - 60_000); // the clock jumped back a minute
+    d.before(&mut client, "s1", "ls");
+    d.before(&mut client, "s1", "ls -la");
+
+    let mut times: Vec<i64> = d.points(&mut client).iter().map(|p| p.at_ms).collect();
+    times.reverse(); // oldest first
+
+    assert_eq!(times.len(), 3);
+    assert!(times[0] >= START_MS);
+    assert!(times.windows(2).all(|w| w[0] < w[1]), "{times:?}");
+}
+
+#[test]
+fn a_client_with_another_protocol_version_is_told_what_to_do() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+
+    let refused = client.call(Request::Hello {
+        client_version: "9.0.0".into(),
+        protocol: 2,
+    });
+
+    let Err(ClientError::Daemon(error)) = refused else {
+        panic!("expected version_mismatch, got {refused:?}");
+    };
+    assert_eq!(error.kind, ErrorKind::VersionMismatch);
+    assert!(error.message.contains("remorad install"), "{}", error.message);
+}
+
+#[test]
+fn a_second_daemon_on_the_same_data_dir_is_refused() {
+    let d = TestDaemon::start();
+
+    let second = Daemon::start(config(d.data.path(), &d.clock));
+
+    assert!(matches!(second, Err(DaemonError::AlreadyRunning(_))));
+    assert!(
+        Client::connect(d.data.path()).is_ok(),
+        "the first daemon is unaffected"
+    );
+}
+
+#[test]
+fn a_stopped_daemon_releases_its_data_dir() {
+    let d = TestDaemon::start();
+    let idle = d.client(); // an idle connection must not keep the daemon alive
+    d.stop();
+
+    assert!(matches!(
+        Client::connect(d.data.path()),
+        Err(ClientError::DaemonNotRunning)
+    ));
+    let again = Daemon::start(config(d.data.path(), &d.clock)).unwrap();
+    again.shutdown();
+    again.wait();
+    drop(idle);
+}
+
+#[test]
+fn shutdown_lets_the_running_request_finish() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+    let status = d.status(&mut client);
+    let project_dir = d
+        .data
+        .path()
+        .join("projects")
+        .join(remora_engine::project_id(&status.root));
+
+    // Another process holds the project, so the next request waits for it.
+    let holder = std::fs::OpenOptions::new()
+        .write(true)
+        .open(project_dir.join("lock"))
+        .unwrap();
+    holder.lock().unwrap();
+    let root = d.root();
+    let slow = std::thread::spawn(move || {
+        client.call(Request::BeforeCommand {
+            root,
+            session: "s1".into(),
+            agent: "claude-code".into(),
+            command: "make".into(),
+        })
+    });
+    std::thread::sleep(Duration::from_millis(200)); // let it reach the worker
+    let mut other = d.client();
+    assert_eq!(other.call(Request::Shutdown).unwrap(), Response::ShuttingDown);
+    holder.unlock().unwrap();
+
+    assert!(
+        matches!(slow.join().unwrap(), Ok(Response::Snapshot { .. })),
+        "finished, not cut off"
+    );
+    d.daemon.wait();
+    assert!(matches!(
+        Client::connect(d.data.path()),
+        Err(ClientError::DaemonNotRunning)
+    ));
+}
