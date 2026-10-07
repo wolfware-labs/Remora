@@ -11,6 +11,13 @@ pub const PROTOCOL_VERSION: u32 = 1;
 /// The largest message, newline excluded, either side accepts.
 pub const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
 
+/// Restore points per `restore_points` answer when the request sets no `limit`.
+pub const DEFAULT_POINTS: usize = 50;
+/// The most restore points one answer carries, whatever the request's `limit`.
+pub const MAX_POINTS: usize = 100;
+/// The most commands a `rewound` answer lists; the rest are only counted.
+pub const MAX_COMMANDS_AFTER: usize = 100;
+
 /// What a client sends: `{"v":1,"id":7,"req":{...}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestEnvelope {
@@ -73,8 +80,14 @@ pub enum Request {
         session: String,
         agent: String,
     },
+    /// Newest first: skip the `skip` newest points, then return up to `limit` (default
+    /// [`DEFAULT_POINTS`], at most [`MAX_POINTS`]).
     RestorePoints {
         root: PathBuf,
+        #[serde(default)]
+        skip: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        limit: Option<usize>,
     },
     /// `point` is a restore point exactly as `restore_points` returned it.
     Rewind {
@@ -89,7 +102,9 @@ pub enum Request {
     Verify {
         root: PathBuf,
     },
-    /// Stop the daemon after the requests already running finish.
+    /// Stop the daemon after the requests already running finish. Every daemon version
+    /// understands `{"v":1,"id":0,"req":{"type":"shutdown"}}`, so an upgrade can always stop
+    /// the daemon it replaces.
     Shutdown,
 }
 
@@ -110,9 +125,10 @@ pub enum Response {
     TurnEnded {
         seq: Option<i64>,
     },
-    /// Newest first.
+    /// One page, newest first; `total` counts every point of the project.
     RestorePoints {
         points: Vec<RestorePoint>,
+        total: usize,
     },
     Rewound(Rewound),
     Status {
@@ -134,9 +150,11 @@ pub struct Rewound {
     /// Paths left untouched because the snapshot could not protect them.
     pub skipped: Vec<String>,
     pub failed: Vec<FailedPath>,
-    /// Commands that ran after the restore point: their effects outside the project are
-    /// not undone.
+    /// Commands that ran after the restore point, oldest first: their effects outside the
+    /// project are not undone. At most [`MAX_COMMANDS_AFTER`], each cut like a label.
     pub commands_after: Vec<CommandRecord>,
+    /// Commands after the point that are not listed.
+    pub commands_omitted: usize,
     /// The journal entry recording the rewind.
     pub seq: i64,
 }

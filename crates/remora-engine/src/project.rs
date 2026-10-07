@@ -16,6 +16,21 @@ use crate::{EngineError, fsutil};
 pub const REWIND_SESSION: &str = "remora-rewind";
 /// The agent name recorded on rewind entries and on turns opened implicitly.
 pub const REMORA_AGENT: &str = "remora";
+/// Restore point labels (prompts, commands) are cut to this many bytes, so listing points
+/// stays small. Points are matched on the cut label, so their identity is unaffected.
+pub const MAX_LABEL_BYTES: usize = 512;
+
+/// `text` cut to [`MAX_LABEL_BYTES`] at a character boundary, with `…` when cut.
+pub fn short_label(text: &str) -> String {
+    if text.len() <= MAX_LABEL_BYTES {
+        return text.to_owned();
+    }
+    let mut end = MAX_LABEL_BYTES;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…", &text[..end])
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -247,7 +262,12 @@ impl Project {
         let mut closed = Vec::new();
         for turn in session::load_all(&self.sessions_dir())? {
             if turn.last_activity_ms() < idle_before_ms {
-                closed.push(self.close_turn(turn, at_ms, true)?);
+                let session_id = turn.session_id.clone();
+                match self.close_turn(turn, at_ms, true) {
+                    Ok(entry) => closed.push(entry),
+                    // One turn that cannot be closed must not keep the others open.
+                    Err(e) => log::warn!("cannot close the idle turn of session {session_id}: {e}"),
+                }
             }
         }
         Ok(closed)
@@ -256,7 +276,18 @@ impl Project {
     fn close_turn(&mut self, turn: OpenTurn, at_ms: i64, interrupted: bool) -> Result<Entry, EngineError> {
         let pre = SnapshotId::parse(&turn.pre_snapshot)?;
         let post = self.take_snapshot()?;
-        let changes = self.changes_between(&pre, &post)?;
+        // A pre-snapshot that can no longer be read (store damage) must not wedge the
+        // session: journal the turn without its changes, marked incomplete.
+        let (changes, incomplete) = match self.changes_between(&pre, &post) {
+            Ok(changes) => (changes, None),
+            Err(e) => {
+                log::warn!(
+                    "journaling the turn of session {} without its changes: {e}",
+                    turn.session_id
+                );
+                (Vec::new(), Some(true))
+            }
+        };
         let entry = self.journal.append(EntryRecord {
             session_id: turn.session_id.clone(),
             kind: EntryKind::Turn,
@@ -269,7 +300,7 @@ impl Project {
             changes,
             interrupted: interrupted.then_some(true),
             rewind_target: None,
-            incomplete: None,
+            incomplete,
         })?;
         session::remove(&session::path_for(&self.sessions_dir(), &turn.session_id))?;
         Ok(entry)
@@ -515,7 +546,7 @@ fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), E
             kind,
             session_id: turn.session_id.to_owned(),
             at_ms,
-            label: label.map(str::to_owned),
+            label: label.map(short_label),
             open: turn.open,
         }))
     };

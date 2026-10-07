@@ -1,7 +1,10 @@
 //! What each job does to a project, and how engine errors become wire errors.
 
-use remora_engine::{EngineError, RewindReport};
-use remora_ipc::{ErrorBody, ErrorKind, FailedPath, JournalCheck, Response, Rewound};
+use remora_engine::{EngineError, RewindReport, short_label};
+use remora_ipc::{
+    DEFAULT_POINTS, ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_COMMANDS_AFTER, MAX_POINTS, Response,
+    Rewound,
+};
 use remora_journal::{BreakReason, VerifyReport};
 
 use crate::worker::{Job, Reply, State};
@@ -39,10 +42,12 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
                     seq: entry.map(|e| e.seq),
                 })
         }
-        Job::RestorePoints => open
-            .project
-            .restore_points()
-            .map(|points| Response::RestorePoints { points }),
+        Job::RestorePoints { skip, limit } => open.project.restore_points().map(|points| {
+            let total = points.len();
+            let limit = limit.unwrap_or(DEFAULT_POINTS).min(MAX_POINTS);
+            let points = points.into_iter().skip(skip).take(limit).collect();
+            Response::RestorePoints { points, total }
+        }),
         Job::Rewind { point, force } => {
             let at = open.at_ms();
             open.project.rewind(&point, at, force).map(rewound)
@@ -73,7 +78,16 @@ fn rewound(report: RewindReport) -> Response {
             .into_iter()
             .map(|(path, error)| FailedPath { path, error })
             .collect(),
-        commands_after: report.commands_after,
+        commands_omitted: report.commands_after.len().saturating_sub(MAX_COMMANDS_AFTER),
+        commands_after: report
+            .commands_after
+            .into_iter()
+            .take(MAX_COMMANDS_AFTER)
+            .map(|mut c| {
+                c.command = short_label(&c.command);
+                c
+            })
+            .collect(),
         seq: report.entry.seq,
     })
 }

@@ -2,10 +2,10 @@ use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use interprocess::local_socket::Stream;
-use interprocess::local_socket::traits::Stream as _;
+use interprocess::ConnectWaitMode;
+use interprocess::local_socket::{ConnectOptions, Stream};
 
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::{
@@ -60,14 +60,7 @@ impl Client {
 
     /// Like [`connect`](Self::connect), with `timeout` for the `hello` exchange and every later call.
     pub fn connect_with_timeout(data_dir: &Path, timeout: Duration) -> Result<Self, ClientError> {
-        let data_dir = data_dir
-            .canonicalize()
-            .map_err(|_| ClientError::DaemonNotRunning)?;
-        let endpoint = endpoint(&data_dir);
-        let stream = Stream::connect(endpoint.name()?).map_err(|e| match e.kind() {
-            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ClientError::DaemonNotRunning,
-            _ => ClientError::Io(e),
-        })?;
+        let stream = connect_stream(data_dir, timeout)?;
         let mut client = Self {
             conn: Some(BufReader::new(stream)),
             next_id: 1,
@@ -124,13 +117,14 @@ impl Client {
             Err(RecvTimeoutError::Disconnected) => return Err(ClientError::Disconnected),
         };
         let response = result?;
-        self.conn = Some(conn);
         if response.v != PROTOCOL_VERSION || response.id != id {
+            // Out of step with the daemon: the connection is not reused.
             return Err(ClientError::Protocol(format!(
                 "answer v{} #{} to request v{PROTOCOL_VERSION} #{id}",
                 response.v, response.id
             )));
         }
+        self.conn = Some(conn);
         match response.outcome {
             Outcome::Ok(response) => Ok(response),
             Outcome::Err(error) => Err(ClientError::Daemon(error)),
@@ -145,4 +139,49 @@ fn exchange(
     write_frame(conn.get_mut(), envelope)?;
     let line = read_frame(conn)?.ok_or(ClientError::Disconnected)?;
     serde_json::from_str(&line).map_err(|e| ClientError::Protocol(e.to_string()))
+}
+
+/// Connect to the endpoint of the daemon that owns `data_dir`, waiting at most `timeout`.
+fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientError> {
+    let data_dir = data_dir
+        .canonicalize()
+        .map_err(|_| ClientError::DaemonNotRunning)?;
+    let endpoint = endpoint(&data_dir);
+    ConnectOptions::new()
+        .name(endpoint.name()?)
+        .wait_mode(ConnectWaitMode::Timeout(timeout))
+        .connect_sync()
+        .map_err(|e| match e.kind() {
+            io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ClientError::DaemonNotRunning,
+            io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => ClientError::Timeout(timeout),
+            _ => ClientError::Io(e),
+        })
+}
+
+/// Stop the daemon that owns `data_dir`, whatever protocol version it speaks, and wait up
+/// to `timeout` until it has stopped. `Ok(false)` if no daemon was running.
+///
+/// No `hello` is exchanged: an older or newer daemon would refuse it. The daemon stops even
+/// though its answer is not read.
+pub fn stop_daemon(data_dir: &Path, timeout: Duration) -> Result<bool, ClientError> {
+    let deadline = Instant::now() + timeout;
+    let mut stream = match connect_stream(data_dir, timeout) {
+        Ok(stream) => stream,
+        Err(ClientError::DaemonNotRunning) => return Ok(false),
+        Err(e) => return Err(e),
+    };
+    let shutdown = RequestEnvelope {
+        v: PROTOCOL_VERSION,
+        id: 0,
+        req: Request::Shutdown,
+    };
+    write_frame(&mut stream, &shutdown)?;
+    drop(stream);
+    loop {
+        match connect_stream(data_dir, timeout) {
+            Err(ClientError::DaemonNotRunning) => return Ok(true),
+            _ if Instant::now() >= deadline => return Err(ClientError::Timeout(timeout)),
+            _ => thread::sleep(Duration::from_millis(50)),
+        }
+    }
 }

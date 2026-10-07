@@ -3,10 +3,11 @@
 use std::error::Error;
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use remora_daemon::{Daemon, DaemonConfig, DaemonError, install_logger, service};
 use remora_engine::default_data_dir;
-use remora_ipc::{Client, ClientError, Request};
+use remora_ipc::stop_daemon;
 
 const USAGE: &str = "usage: remorad <command>
 
@@ -75,13 +76,8 @@ fn install() -> Result<(), Box<dyn Error>> {
 fn uninstall() -> Result<(), Box<dyn Error>> {
     println!("{}", service::uninstall()?);
     // A daemon started by hand (or by the Windows logon entry) keeps running otherwise.
-    match Client::connect(&default_data_dir()?) {
-        Ok(mut client) => {
-            client.call(Request::Shutdown)?;
-            println!("stopped the running daemon");
-        }
-        Err(ClientError::DaemonNotRunning) => {}
-        Err(e) => return Err(e.into()),
+    if stop_daemon(&default_data_dir()?, Duration::from_secs(10))? {
+        println!("stopped the running daemon");
     }
     Ok(())
 }

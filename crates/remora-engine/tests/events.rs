@@ -199,3 +199,44 @@ fn a_second_damaged_session_file_keeps_the_first_as_evidence() {
     let second = std::fs::read_to_string(sessions.join("session-1.json.corrupt.1")).unwrap();
     assert_eq!((first.as_str(), second.as_str()), ("damaged 1", "damaged 2"));
 }
+
+#[test]
+fn a_turn_whose_start_snapshot_was_lost_is_journaled_as_incomplete() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    let pre = p.begin_turn(&agent(), Some("edit"), 1_000).unwrap();
+    let manifests = fx
+        .data
+        .path()
+        .join("projects")
+        .join(p.id())
+        .join("store/manifests");
+    std::fs::remove_file(manifests.join(format!("{pre}.json"))).unwrap();
+    fx.write("a.txt", "edited");
+
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+
+    assert_eq!(entry.record.incomplete, Some(true));
+    assert!(entry.record.changes.is_empty());
+    assert!(
+        p.status().unwrap().open_sessions.is_empty(),
+        "the session is not wedged"
+    );
+}
+
+#[test]
+fn long_labels_are_cut_on_restore_points_and_still_identify_them() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "v1");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some(&"é".repeat(1_000)), 1_000).unwrap();
+    fx.write("a.txt", "v2");
+    p.end_turn(&agent(), 2_000).unwrap();
+
+    let point = p.restore_points().unwrap().pop().unwrap();
+    let label = point.label.clone().unwrap();
+    assert!(label.len() <= remora_engine::MAX_LABEL_BYTES + "…".len());
+    assert!(label.ends_with('…'));
+    p.rewind(&point, 3_000, false).unwrap();
+    assert_eq!(fx.read("a.txt"), "v1");
+}

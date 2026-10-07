@@ -240,7 +240,9 @@ mod platform {
         let unit = unit_path()?;
         write_file(&unit, &systemd_unit(exe))?;
         run("systemctl", &["--user", "daemon-reload"])?;
-        run("systemctl", &["--user", "enable", "--now", SYSTEMD_UNIT])?;
+        run("systemctl", &["--user", "enable", SYSTEMD_UNIT])?;
+        // `restart` also starts it, and replaces a daemon from an earlier install.
+        run("systemctl", &["--user", "restart", SYSTEMD_UNIT])?;
         Ok(format!("installed systemd user unit {}", unit.display()))
     }
 
@@ -265,6 +267,14 @@ mod platform {
                 "add", RUN_KEY, "/v", RUN_VALUE, "/t", "REG_SZ", "/d", &command, "/f",
             ],
         )?;
+        // Replace a daemon from an earlier install: it would keep the endpoint.
+        let data_dir = remora_engine::default_data_dir().map_err(|_| ServiceError::NoHome)?;
+        remora_ipc::stop_daemon(&data_dir, std::time::Duration::from_secs(10)).map_err(|e| {
+            ServiceError::Command {
+                command: "stop the running remorad".to_owned(),
+                detail: e.to_string(),
+            }
+        })?;
         start_detached(exe)?;
         Ok(format!(
             r"added logon entry {RUN_KEY}\{RUN_VALUE} and started remorad"

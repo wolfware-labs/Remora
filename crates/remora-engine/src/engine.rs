@@ -57,7 +57,7 @@ impl Engine {
 
     /// Open (or create) the data for the project rooted at `root`.
     pub fn project(&self, root: &Path) -> Result<Project, EngineError> {
-        let root = root.canonicalize().map_err(io_at(root))?;
+        let root = self.resolve_root(root)?;
         // A project that contains the data directory would snapshot (and rewind) Remora's
         // own journal, sessions and key; one inside it would rewind other projects' data.
         if root.starts_with(&self.data_dir) || self.data_dir.starts_with(&root) {
@@ -97,5 +97,59 @@ impl Engine {
             }
         }
         Project::open(id, root, dir, self.key.clone())
+    }
+
+    /// The canonical project root. A folder that no longer exists (the agent deleted it)
+    /// is recreated, empty, when Remora already has a project there, so its history stays
+    /// reachable; an unknown missing folder is an error and nothing is created.
+    fn resolve_root(&self, root: &Path) -> Result<PathBuf, EngineError> {
+        let missing = match root.canonicalize() {
+            Ok(root) => return Ok(root),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => e,
+            Err(e) => return Err(io_at(root)(e)),
+        };
+        // The folder itself, or the target of a symlink to it that now dangles.
+        let link_target = fs::read_link(root)
+            .ok()
+            .and_then(|target| root.parent().map(|parent| parent.join(target)));
+        let recorded = [Some(root.to_path_buf()), link_target]
+            .into_iter()
+            .flatten()
+            .filter_map(|path| canonical_prefix(&path))
+            .find(|path| self.has_project_at(path));
+        match recorded {
+            Some(recorded) => {
+                fs::create_dir_all(&recorded).map_err(io_at(&recorded))?;
+                recorded.canonicalize().map_err(io_at(&recorded))
+            }
+            None => Err(io_at(root)(missing)),
+        }
+    }
+
+    /// Whether a project is recorded with exactly this canonical root.
+    fn has_project_at(&self, root: &Path) -> bool {
+        let file = self
+            .data_dir
+            .join("projects")
+            .join(project_id(root))
+            .join("project.json");
+        fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<ProjectFile>(&bytes).ok())
+            .is_some_and(|recorded| Path::new(&recorded.root) == root)
+    }
+}
+
+/// `path` with its deepest existing ancestor canonicalized and the missing rest appended:
+/// what its canonical form was before the missing part was deleted.
+fn canonical_prefix(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(base) = existing.canonicalize() {
+            return Some(missing.iter().rev().fold(base, |path, part| path.join(part)));
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
     }
 }

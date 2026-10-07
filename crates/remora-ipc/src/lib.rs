@@ -17,10 +17,10 @@ mod endpoint;
 mod framing;
 mod protocol;
 
-pub use client::{Client, ClientError, DEFAULT_TIMEOUT};
+pub use client::{Client, ClientError, DEFAULT_TIMEOUT, stop_daemon};
 pub use endpoint::{Endpoint, endpoint};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
-    ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_MESSAGE_BYTES, Outcome, PROTOCOL_VERSION, Request,
-    RequestEnvelope, Response, ResponseEnvelope, Rewound,
+    DEFAULT_POINTS, ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_COMMANDS_AFTER, MAX_MESSAGE_BYTES,
+    MAX_POINTS, Outcome, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, Rewound,
 };

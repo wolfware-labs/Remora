@@ -107,8 +107,12 @@ fn every_request_has_a_stable_wire_form() {
         json!({"type": "end_turn", "root": "/home/me/proj", "session": "s1", "agent": "claude-code"}),
     );
     request(
-        Request::RestorePoints { root: root() },
-        json!({"type": "restore_points", "root": "/home/me/proj"}),
+        Request::RestorePoints {
+            root: root(),
+            skip: 50,
+            limit: Some(20),
+        },
+        json!({"type": "restore_points", "root": "/home/me/proj", "skip": 50, "limit": 20}),
     );
     request(
         Request::Rewind {
@@ -138,6 +142,15 @@ fn optional_request_fields_may_be_left_out() {
         "agent": "a", "command": "ls"}))
     .unwrap();
     assert!(matches!(req, Request::AfterCommand { exit_code: None, .. }));
+    let req: Request = serde_json::from_value(json!({"type": "restore_points", "root": "/p"})).unwrap();
+    assert!(matches!(
+        req,
+        Request::RestorePoints {
+            skip: 0,
+            limit: None,
+            ..
+        }
+    ));
 }
 
 fn ok(response: Response, expected: Value) {
@@ -176,8 +189,9 @@ fn every_response_has_a_stable_wire_form() {
     ok(
         Response::RestorePoints {
             points: vec![point()],
+            total: 120,
         },
-        json!({"type": "restore_points", "points": [point_json()]}),
+        json!({"type": "restore_points", "points": [point_json()], "total": 120}),
     );
     ok(
         Response::Rewound(Rewound {
@@ -195,11 +209,13 @@ fn every_response_has_a_stable_wire_form() {
                 snapshot_id: None,
                 at_ms: Some(2_000),
             }],
+            commands_omitted: 3,
             seq: 9,
         }),
         json!({"type": "rewound", "safety_snapshot": "c".repeat(64), "written": 2, "deleted": 1,
                "skipped": ["big.iso"], "failed": [{"path": "locked/a", "error": "permission denied"}],
-               "commands_after": [{"command": "git push", "exit_code": 0, "at_ms": 2000}], "seq": 9}),
+               "commands_after": [{"command": "git push", "exit_code": 0, "at_ms": 2000}],
+               "commands_omitted": 3, "seq": 9}),
     );
     ok(
         Response::Status {
@@ -270,6 +286,19 @@ fn every_error_has_a_stable_wire_form() {
     err(ErrorKind::LockTimeout, json!({"kind": "lock_timeout"}));
     err(ErrorKind::InvalidSessionId, json!({"kind": "invalid_session_id"}));
     err(ErrorKind::Internal, json!({"kind": "internal"}));
+}
+
+#[test]
+fn a_shutdown_request_has_the_wire_form_every_version_accepts() {
+    let stable = RequestEnvelope {
+        v: 1,
+        id: 0,
+        req: Request::Shutdown,
+    };
+    assert_eq!(
+        serde_json::to_string(&stable).unwrap(),
+        r#"{"v":1,"id":0,"req":{"type":"shutdown"}}"#
+    );
 }
 
 #[test]

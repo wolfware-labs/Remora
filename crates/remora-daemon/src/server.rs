@@ -12,8 +12,8 @@ use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
 use remora_engine::{Engine, EngineError, SessionRef};
 use remora_ipc::{
-    Endpoint, ErrorBody, ErrorKind, FrameError, Outcome, PROTOCOL_VERSION, Request, RequestEnvelope,
-    Response, ResponseEnvelope, endpoint, read_frame, write_frame,
+    Endpoint, ErrorBody, ErrorKind, FrameError, MAX_MESSAGE_BYTES, Outcome, PROTOCOL_VERSION, Request,
+    RequestEnvelope, Response, ResponseEnvelope, endpoint, read_frame, write_frame,
 };
 
 use crate::clock::{Clock, SystemClock};
@@ -108,7 +108,13 @@ impl Daemon {
                 janitor_loop(&shared, config.sweep_every)
             })
         };
-        lock(&shared.threads).extend([accept, janitor].into_iter().flatten());
+        let (Some(accept), Some(janitor)) = (accept, janitor) else {
+            return Err(DaemonError::Io {
+                path: shared.data_dir.clone(),
+                source: io::Error::other("cannot start the daemon's threads"),
+            });
+        };
+        lock(&shared.threads).extend([accept, janitor]);
         log::info!("remorad {VERSION} listening on {}", shared.endpoint);
         Ok(DaemonHandle { shared })
     }
@@ -281,7 +287,9 @@ impl Shared {
                     session: SessionRef::new(session, agent),
                 },
             ),
-            Request::RestorePoints { root } => self.run(&root, Job::RestorePoints),
+            Request::RestorePoints { root, skip, limit } => {
+                self.run(&root, Job::RestorePoints { skip, limit })
+            }
             Request::Rewind { root, point, force } => self.run(&root, Job::Rewind { point, force }),
             Request::Status { root } => self.run(&root, Job::Status),
             Request::Verify { root } => self.run(&root, Job::Verify),
@@ -523,14 +531,23 @@ fn answer(conn: &mut BufReader<Stream>, id: u64, reply: Reply) -> Result<(), Fra
         Ok(response) => Outcome::Ok(response),
         Err(error) => Outcome::Err(error),
     };
-    write_frame(
-        conn.get_mut(),
-        &ResponseEnvelope {
-            v: PROTOCOL_VERSION,
-            id,
-            outcome,
-        },
-    )
+    let envelope = |outcome| ResponseEnvelope {
+        v: PROTOCOL_VERSION,
+        id,
+        outcome,
+    };
+    match write_frame(conn.get_mut(), &envelope(outcome)) {
+        // Never close silently: say why there is no answer.
+        Err(FrameError::TooLarge) => {
+            log::error!("the answer to request #{id} is larger than {MAX_MESSAGE_BYTES} bytes");
+            let error = ErrorBody::new(
+                ErrorKind::Internal,
+                format!("the answer is larger than the {MAX_MESSAGE_BYTES}-byte message limit"),
+            );
+            write_frame(conn.get_mut(), &envelope(Outcome::Err(error)))
+        }
+        written => written,
+    }
 }
 
 /// The `id` of a request that could not be fully read, if it has one.

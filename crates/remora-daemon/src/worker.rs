@@ -30,7 +30,10 @@ pub(crate) enum Job {
     EndTurn {
         session: SessionRef,
     },
-    RestorePoints,
+    RestorePoints {
+        skip: usize,
+        limit: Option<usize>,
+    },
     Rewind {
         point: RestorePoint,
         force: bool,
@@ -105,7 +108,10 @@ impl State {
                     clock: Arc::clone(&self.ctx.clock),
                     stale_after_ms: self.ctx.stale_after_ms,
                 };
-                open.sweep()?;
+                if let Err(e) = open.sweep() {
+                    // The project stays usable; the sweep is retried by the janitor.
+                    log::warn!("closing stale turns in {} failed: {e}", self.root.display());
+                }
                 open
             }
         };

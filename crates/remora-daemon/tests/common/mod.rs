@@ -93,8 +93,13 @@ impl TestDaemon {
     }
 
     pub fn points(&self, client: &mut Client) -> Vec<RestorePoint> {
-        match client.call(Request::RestorePoints { root: self.root() }).unwrap() {
-            Response::RestorePoints { points } => points,
+        let request = Request::RestorePoints {
+            root: self.root(),
+            skip: 0,
+            limit: None,
+        };
+        match client.call(request).unwrap() {
+            Response::RestorePoints { points, .. } => points,
             other => panic!("unexpected {other:?}"),
         }
     }

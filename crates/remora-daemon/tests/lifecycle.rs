@@ -160,3 +160,20 @@ fn shutdown_lets_the_running_request_finish() {
         Err(ClientError::DaemonNotRunning)
     ));
 }
+
+#[test]
+fn stop_daemon_stops_a_daemon_without_a_hello() {
+    let d = TestDaemon::start();
+
+    assert!(remora_ipc::stop_daemon(d.data.path(), Duration::from_secs(10)).unwrap());
+
+    d.daemon.wait();
+    assert!(matches!(
+        Client::connect(d.data.path()),
+        Err(ClientError::DaemonNotRunning)
+    ));
+    assert!(
+        !remora_ipc::stop_daemon(d.data.path(), Duration::from_secs(1)).unwrap(),
+        "nothing left to stop"
+    );
+}

@@ -157,3 +157,43 @@ fn a_project_folder_inside_the_data_dir_is_refused() {
         "{result:?}"
     );
 }
+
+#[test]
+fn a_deleted_project_folder_is_recreated_when_its_project_is_known() {
+    let fx = Fixture::new();
+    let root = fx.root().canonicalize().unwrap();
+    let id = fx.open().id().to_owned();
+    std::fs::remove_dir_all(&root).unwrap();
+
+    let project = fx.engine().project(&root).unwrap();
+
+    assert_eq!(project.id(), id);
+    assert!(root.is_dir(), "recreated, empty");
+}
+
+#[test]
+fn an_unknown_missing_folder_is_an_error_and_nothing_is_created() {
+    let fx = Fixture::new();
+    let missing = fx.root().join("never-a-project");
+
+    let result = fx.engine().project(&missing);
+
+    assert!(matches!(result, Err(EngineError::Io { .. })), "{result:?}");
+    assert!(!missing.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_to_a_known_project_finds_it() {
+    let fx = Fixture::new();
+    let real = fx.root().join("real");
+    std::fs::create_dir(&real).unwrap();
+    let link = fx.root().join("link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+    let id = fx.engine().project(&link).unwrap().id().to_owned();
+    std::fs::remove_dir_all(&real).unwrap();
+
+    let project = fx.engine().project(&link).unwrap();
+
+    assert_eq!(project.id(), id);
+}
