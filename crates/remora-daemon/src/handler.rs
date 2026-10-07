@@ -2,10 +2,10 @@
 
 use remora_engine::{EngineError, RewindReport, short_label};
 use remora_ipc::{
-    DEFAULT_POINTS, ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_COMMANDS_AFTER, MAX_POINTS, Response,
-    Rewound,
+    DEFAULT_POINTS, ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_COMMANDS_AFTER, MAX_POINTS,
+    MAX_PREVIEW_PATHS, Preview, Response, Rewound,
 };
-use remora_journal::{BreakReason, VerifyReport};
+use remora_journal::{BreakReason, CommandRecord, VerifyReport};
 
 use crate::worker::{Job, Reply, State};
 
@@ -18,21 +18,39 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
                 .begin_turn(&session, prompt.as_deref(), at)
                 .map(|snapshot| Response::Snapshot { snapshot })
         }
-        Job::BeforeCommand { session, command } => {
+        Job::BeforeCommand {
+            session,
+            command,
+            tool_use_id,
+        } => {
             let at = open.at_ms();
             open.project
-                .before_command(&session, &command, None, at)
+                .before_command(&session, &command, tool_use_id.as_deref(), at)
                 .map(|snapshot| Response::Snapshot { snapshot })
         }
         Job::AfterCommand {
             session,
             command,
+            tool_use_id,
             exit_code,
         } => {
             let at = open.at_ms();
             open.project
-                .after_command(&session, &command, None, exit_code, at)
+                .after_command(&session, &command, tool_use_id.as_deref(), exit_code, at)
                 .map(|()| Response::Recorded)
+        }
+        Job::EndSession { session } => {
+            let at = open.at_ms();
+            open.project
+                .end_session(&session, at)
+                .map(|entry| Response::TurnEnded {
+                    seq: entry.map(|e| e.seq),
+                })
+        }
+        Job::Preview { point } => open.project.preview(&point).map(preview),
+        Job::RestoreSnapshot { snapshot, force } => {
+            let at = open.at_ms();
+            open.project.restore_snapshot(&snapshot, at, force).map(rewound)
         }
         Job::EndTurn { session } => {
             let at = open.at_ms();
@@ -66,7 +84,46 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
     result.map_err(engine_error)
 }
 
+/// At most `max` commands, oldest first, each cut like a label; and how many were left out.
+fn bounded_commands(commands: Vec<CommandRecord>) -> (Vec<CommandRecord>, usize) {
+    let omitted = commands.len().saturating_sub(MAX_COMMANDS_AFTER);
+    let kept = commands
+        .into_iter()
+        .take(MAX_COMMANDS_AFTER)
+        .map(|mut c| {
+            c.command = short_label(&c.command);
+            c
+        })
+        .collect();
+    (kept, omitted)
+}
+
+fn preview(preview: remora_engine::Preview) -> Response {
+    let capped = |paths: Vec<String>| {
+        let total = paths.len();
+        (
+            paths.into_iter().take(MAX_PREVIEW_PATHS).collect::<Vec<_>>(),
+            total,
+        )
+    };
+    let (restore, restore_total) = capped(preview.restore);
+    let (delete, delete_total) = capped(preview.delete);
+    let (revert, revert_total) = capped(preview.revert);
+    let (commands_after, commands_omitted) = bounded_commands(preview.commands_after);
+    Response::Preview(Preview {
+        restore,
+        restore_total,
+        delete,
+        delete_total,
+        revert,
+        revert_total,
+        commands_after,
+        commands_omitted,
+    })
+}
+
 fn rewound(report: RewindReport) -> Response {
+    let (commands_after, commands_omitted) = bounded_commands(report.commands_after);
     Response::Rewound(Rewound {
         safety_snapshot: report.safety_snapshot,
         written: report.restore.written,
@@ -78,16 +135,8 @@ fn rewound(report: RewindReport) -> Response {
             .into_iter()
             .map(|(path, error)| FailedPath { path, error })
             .collect(),
-        commands_omitted: report.commands_after.len().saturating_sub(MAX_COMMANDS_AFTER),
-        commands_after: report
-            .commands_after
-            .into_iter()
-            .take(MAX_COMMANDS_AFTER)
-            .map(|mut c| {
-                c.command = short_label(&c.command);
-                c
-            })
-            .collect(),
+        commands_after,
+        commands_omitted,
         seq: report.entry.seq,
     })
 }

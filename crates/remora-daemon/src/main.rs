@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use remora_daemon::{Daemon, DaemonConfig, DaemonError, install_logger, service};
+use remora_daemon::{Ran, run_in_foreground, service};
 use remora_engine::default_data_dir;
 use remora_ipc::stop_daemon;
 
@@ -48,22 +48,10 @@ fn run(data_dir: Option<PathBuf>) -> Result<(), Box<dyn Error>> {
         Some(dir) => dir,
         None => default_data_dir()?,
     };
-    install_logger(&data_dir)?;
-    let daemon = match Daemon::start(DaemonConfig::new(data_dir)) {
-        Ok(daemon) => daemon,
-        // Not a failure: the service manager must not restart us in a loop.
-        Err(DaemonError::AlreadyRunning(dir)) => {
-            eprintln!("remorad is already running for {}", dir.display());
-            return Ok(());
-        }
-        Err(e) => {
-            log::error!("cannot start: {e}");
-            return Err(e.into());
-        }
-    };
-    let stopper = daemon.clone();
-    ctrlc::set_handler(move || stopper.shutdown())?;
-    daemon.wait();
+    // "Already running" is not a failure: the service manager must not restart us in a loop.
+    if let Ran::AlreadyRunning(dir) = run_in_foreground(&data_dir)? {
+        eprintln!("remorad is already running for {}", dir.display());
+    }
     Ok(())
 }
 

@@ -8,6 +8,7 @@ use std::thread::{self, JoinHandle};
 
 use remora_engine::{Engine, EngineError, Project, RestorePoint, SessionRef};
 use remora_ipc::{ErrorBody, ErrorKind, Response};
+use remora_snap::SnapshotId;
 
 use crate::clock::{Clock, Monotonic};
 
@@ -21,14 +22,26 @@ pub(crate) enum Job {
     BeforeCommand {
         session: SessionRef,
         command: String,
+        tool_use_id: Option<String>,
     },
     AfterCommand {
         session: SessionRef,
         command: String,
+        tool_use_id: Option<String>,
         exit_code: Option<i32>,
     },
     EndTurn {
         session: SessionRef,
+    },
+    EndSession {
+        session: SessionRef,
+    },
+    Preview {
+        point: RestorePoint,
+    },
+    RestoreSnapshot {
+        snapshot: SnapshotId,
+        force: bool,
     },
     RestorePoints {
         skip: usize,

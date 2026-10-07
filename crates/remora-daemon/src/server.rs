@@ -27,7 +27,9 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub struct DaemonConfig {
     pub data_dir: PathBuf,
     pub clock: Arc<dyn Clock>,
-    /// Turns with no event for this long are closed as interrupted (default 30 minutes).
+    /// Turns with no event for this long are closed as interrupted (default 6 hours: a session
+    /// that exits closes its own turn with `end_session`, so this only catches crashes and
+    /// must not close a turn waiting on a long permission prompt).
     pub stale_turn_after: Duration,
     /// How often stale turns are looked for (default 1 minute).
     pub sweep_every: Duration,
@@ -41,7 +43,7 @@ impl DaemonConfig {
         Self {
             data_dir: data_dir.into(),
             clock: Arc::new(SystemClock),
-            stale_turn_after: Duration::from_secs(30 * 60),
+            stale_turn_after: Duration::from_secs(6 * 60 * 60),
             sweep_every: Duration::from_secs(60),
             idle_connection_after: Duration::from_secs(30),
         }
@@ -260,11 +262,13 @@ impl Shared {
                 session,
                 agent,
                 command,
+                tool_use_id,
             } => self.run(
                 &root,
                 Job::BeforeCommand {
                     session: SessionRef::new(session, agent),
                     command,
+                    tool_use_id,
                 },
             ),
             Request::AfterCommand {
@@ -272,15 +276,29 @@ impl Shared {
                 session,
                 agent,
                 command,
+                tool_use_id,
                 exit_code,
             } => self.run(
                 &root,
                 Job::AfterCommand {
                     session: SessionRef::new(session, agent),
                     command,
+                    tool_use_id,
                     exit_code,
                 },
             ),
+            Request::EndSession { root, session, agent } => self.run(
+                &root,
+                Job::EndSession {
+                    session: SessionRef::new(session, agent),
+                },
+            ),
+            Request::Preview { root, point } => self.run(&root, Job::Preview { point }),
+            Request::RestoreSnapshot {
+                root,
+                snapshot,
+                force,
+            } => self.run(&root, Job::RestoreSnapshot { snapshot, force }),
             Request::EndTurn { root, session, agent } => self.run(
                 &root,
                 Job::EndTurn {

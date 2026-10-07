@@ -220,6 +220,9 @@ mod platform {
 
     pub(super) fn uninstall() -> Result<String, ServiceError> {
         let plist = plist_path()?;
+        if !plist.exists() {
+            return Ok(format!("no launchd agent installed at {}", plist.display()));
+        }
         unload(&gui_domain()?)?;
         remove_file(&plist)?;
         Ok(format!("removed launchd agent {}", plist.display()))
@@ -248,6 +251,9 @@ mod platform {
 
     pub(super) fn uninstall() -> Result<String, ServiceError> {
         let unit = unit_path()?;
+        if !unit.exists() {
+            return Ok(format!("no systemd user unit installed at {}", unit.display()));
+        }
         let _ = run("systemctl", &["--user", "disable", "--now", SYSTEMD_UNIT]);
         remove_file(&unit)?;
         let _ = run("systemctl", &["--user", "daemon-reload"]);

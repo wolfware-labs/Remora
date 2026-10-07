@@ -159,7 +159,9 @@ fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientEr
 }
 
 /// Stop the daemon that owns `data_dir`, whatever protocol version it speaks, and wait up
-/// to `timeout` until it has stopped. `Ok(false)` if no daemon was running.
+/// to `timeout` until it has stopped: its endpoint gone and its instance lock
+/// (`remorad.lock`) released, so a replacement can start at once. `Ok(false)` if no daemon
+/// was running.
 ///
 /// No `hello` is exchanged: an older or newer daemon would refuse it. The daemon stops even
 /// though its answer is not read.
@@ -178,10 +180,27 @@ pub fn stop_daemon(data_dir: &Path, timeout: Duration) -> Result<bool, ClientErr
     write_frame(&mut stream, &shutdown)?;
     drop(stream);
     loop {
-        match connect_stream(data_dir, timeout) {
-            Err(ClientError::DaemonNotRunning) => return Ok(true),
-            _ if Instant::now() >= deadline => return Err(ClientError::Timeout(timeout)),
-            _ => thread::sleep(Duration::from_millis(50)),
+        let left = deadline.saturating_duration_since(Instant::now());
+        let gone = matches!(
+            connect_stream(data_dir, left.max(Duration::from_millis(10))),
+            Err(ClientError::DaemonNotRunning)
+        );
+        if gone && instance_lock_is_free(data_dir) {
+            return Ok(true);
         }
+        if Instant::now() >= deadline {
+            return Err(ClientError::Timeout(timeout));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// Whether no daemon holds `<data_dir>/remorad.lock` (a missing file counts as free).
+fn instance_lock_is_free(data_dir: &Path) -> bool {
+    let path = data_dir.join("remorad.lock");
+    match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+        // Locking and dropping at once: the lock is only probed.
+        Ok(file) => file.try_lock().is_ok(),
+        Err(e) => e.kind() == io::ErrorKind::NotFound,
     }
 }

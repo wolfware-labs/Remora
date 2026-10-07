@@ -22,5 +22,6 @@ pub use endpoint::{Endpoint, endpoint};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
     DEFAULT_POINTS, ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_COMMANDS_AFTER, MAX_MESSAGE_BYTES,
-    MAX_POINTS, Outcome, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, Rewound,
+    MAX_POINTS, MAX_PREVIEW_PATHS, Outcome, PROTOCOL_VERSION, Preview, Request, RequestEnvelope, Response,
+    ResponseEnvelope, Rewound,
 };

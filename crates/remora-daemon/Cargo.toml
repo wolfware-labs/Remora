@@ -18,6 +18,7 @@ path = "src/main.rs"
 remora-engine.workspace = true
 remora-ipc.workspace = true
 remora-journal.workspace = true
+remora-snap.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 interprocess.workspace = true

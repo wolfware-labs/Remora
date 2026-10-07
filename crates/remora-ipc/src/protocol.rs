@@ -17,6 +17,8 @@ pub const DEFAULT_POINTS: usize = 50;
 pub const MAX_POINTS: usize = 100;
 /// The most commands a `rewound` answer lists; the rest are only counted.
 pub const MAX_COMMANDS_AFTER: usize = 100;
+/// The most paths each list of a `preview` answer carries; the rest are only counted.
+pub const MAX_PREVIEW_PATHS: usize = 200;
 
 /// What a client sends: `{"v":1,"id":7,"req":{...}}`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -61,11 +63,14 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
     },
+    /// `tool_use_id`, when the agent has one, pairs the command with its `after_command`.
     BeforeCommand {
         root: PathBuf,
         session: String,
         agent: String,
         command: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
     },
     AfterCommand {
         root: PathBuf,
@@ -73,9 +78,17 @@ pub enum Request {
         agent: String,
         command: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_use_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
     },
     EndTurn {
+        root: PathBuf,
+        session: String,
+        agent: String,
+    },
+    /// The agent's session ended: its open turn, if any, is closed as interrupted.
+    EndSession {
         root: PathBuf,
         session: String,
         agent: String,
@@ -93,6 +106,18 @@ pub enum Request {
     Rewind {
         root: PathBuf,
         point: RestorePoint,
+        #[serde(default)]
+        force: bool,
+    },
+    /// What rewinding to `point` would change. Changes nothing.
+    Preview {
+        root: PathBuf,
+        point: RestorePoint,
+    },
+    /// Restore a snapshot by id, such as the `safety_snapshot` of a `rewind_incomplete` error.
+    RestoreSnapshot {
+        root: PathBuf,
+        snapshot: SnapshotId,
         #[serde(default)]
         force: bool,
     },
@@ -131,6 +156,7 @@ pub enum Response {
         total: usize,
     },
     Rewound(Rewound),
+    Preview(Preview),
     Status {
         status: Status,
     },
@@ -157,6 +183,24 @@ pub struct Rewound {
     pub commands_omitted: usize,
     /// The journal entry recording the rewind.
     pub seq: i64,
+}
+
+/// What a rewind would change. Each list holds at most [`MAX_PREVIEW_PATHS`] paths; the
+/// `*_total` counts include the rest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Preview {
+    /// Absent now: brought back.
+    pub restore: Vec<String>,
+    pub restore_total: usize,
+    /// Created after the point: removed.
+    pub delete: Vec<String>,
+    pub delete_total: usize,
+    /// Changed since the point: reverted.
+    pub revert: Vec<String>,
+    pub revert_total: usize,
+    /// Commands after the point, oldest first, as in [`Rewound`].
+    pub commands_after: Vec<CommandRecord>,
+    pub commands_omitted: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

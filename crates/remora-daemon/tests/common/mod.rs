@@ -78,6 +78,7 @@ impl TestDaemon {
                 session: session.into(),
                 agent: "claude-code".into(),
                 command: command.into(),
+                tool_use_id: None,
             })
             .unwrap()
     }

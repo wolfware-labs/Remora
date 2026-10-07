@@ -23,6 +23,7 @@ fn what_rm_rf_deleted_comes_back_with_a_rewind() {
             session: "s1".into(),
             agent: "claude-code".into(),
             command: "rm -rf src build".into(),
+            tool_use_id: None,
             exit_code: Some(0),
         })
         .unwrap();
@@ -342,7 +343,7 @@ fn a_turn_whose_snapshot_was_lost_does_not_lock_the_project() {
         .join(remora_engine::project_id(&status_root))
         .join("store");
     std::fs::remove_file(store.join("manifests").join(format!("{snapshot}.json"))).unwrap();
-    d.clock.advance(std::time::Duration::from_secs(45 * 60));
+    d.clock.advance(std::time::Duration::from_secs(7 * 60 * 60));
 
     let restarted = remora_daemon::Daemon::start(common::config(d.data.path(), &d.clock)).unwrap();
     let mut client = remora_ipc::Client::connect(d.data.path()).unwrap();
@@ -359,4 +360,73 @@ fn a_turn_whose_snapshot_was_lost_does_not_lock_the_project() {
     assert!(status.open_sessions.is_empty(), "the stale turn was closed");
     assert_eq!(status.journal_entries, 1);
     assert!(matches!(begun, Ok(Response::Snapshot { .. })), "{begun:?}");
+}
+
+#[test]
+fn a_preview_then_a_rewind_and_its_undo_by_snapshot_id() {
+    let d = TestDaemon::start();
+    d.write("a.txt", "v1");
+    let mut client = d.client();
+    d.begin(&mut client, "s1", Some("edit"));
+    d.write("a.txt", "v2");
+    d.write("new.txt", "created");
+    d.end(&mut client, "s1");
+    let start = d
+        .points(&mut client)
+        .into_iter()
+        .find(|p| p.kind == PointKind::TurnStart)
+        .unwrap();
+
+    let Response::Preview(preview) = client
+        .call(Request::Preview {
+            root: d.root(),
+            point: start.clone(),
+        })
+        .unwrap()
+    else {
+        panic!("expected a preview");
+    };
+    assert_eq!(
+        (preview.delete, preview.revert),
+        (vec!["new.txt".to_owned()], vec!["a.txt".to_owned()])
+    );
+    assert_eq!(d.read("a.txt"), "v2", "a preview changes nothing");
+
+    let Response::Rewound(rewound) = client
+        .call(Request::Rewind {
+            root: d.root(),
+            point: start,
+            force: false,
+        })
+        .unwrap()
+    else {
+        panic!("expected a rewind");
+    };
+    assert_eq!(d.read("a.txt"), "v1");
+    client
+        .call(Request::RestoreSnapshot {
+            root: d.root(),
+            snapshot: rewound.safety_snapshot,
+            force: false,
+        })
+        .unwrap();
+    assert_eq!(d.read("a.txt"), "v2", "the rewind was undone");
+}
+
+#[test]
+fn ending_a_session_closes_its_turn() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+
+    let ended = client
+        .call(Request::EndSession {
+            root: d.root(),
+            session: "s1".into(),
+            agent: "claude-code".into(),
+        })
+        .unwrap();
+
+    assert_eq!(ended, Response::TurnEnded { seq: Some(1) });
+    assert!(d.status(&mut client).open_sessions.is_empty());
 }

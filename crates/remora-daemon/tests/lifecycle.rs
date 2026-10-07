@@ -9,17 +9,17 @@ use remora_daemon::{Daemon, DaemonError};
 use remora_ipc::{Client, ClientError, ErrorKind, Request, Response};
 
 #[test]
-fn a_turn_idle_for_31_minutes_is_closed_as_interrupted() {
+fn a_turn_idle_for_over_6_hours_is_closed_as_interrupted() {
     let d = TestDaemon::start();
     let mut client = d.client();
     d.begin(&mut client, "s1", Some("interrupted by the user"));
 
-    d.clock.advance(Duration::from_secs(29 * 60));
+    d.clock.advance(Duration::from_secs(5 * 60 * 60 + 59 * 60));
     d.daemon.sweep();
     assert_eq!(
         d.status(&mut client).open_sessions,
         ["s1"],
-        "29 minutes is not stale yet"
+        "5 h 59 min is not stale yet: a permission prompt may be waiting"
     );
 
     d.clock.advance(Duration::from_secs(2 * 60));
@@ -37,7 +37,7 @@ fn turns_left_open_before_a_restart_are_closed_when_their_project_is_used() {
     drop(client);
     d.stop();
 
-    d.clock.advance(Duration::from_secs(45 * 60));
+    d.clock.advance(Duration::from_secs(7 * 60 * 60));
     let restarted = Daemon::start(config(d.data.path(), &d.clock)).unwrap();
     let mut client = Client::connect(d.data.path()).unwrap();
     let status = d.status(&mut client);
@@ -136,6 +136,7 @@ fn shutdown_lets_the_running_request_finish() {
             session: "s1".into(),
             agent: "claude-code".into(),
             command: "make".into(),
+            tool_use_id: None,
         })
     });
     std::thread::sleep(Duration::from_millis(200)); // let it reach the worker
@@ -164,10 +165,13 @@ fn shutdown_lets_the_running_request_finish() {
 #[test]
 fn stop_daemon_stops_a_daemon_without_a_hello() {
     let d = TestDaemon::start();
+    // As in `remorad run`, a thread waits on the daemon: that is what releases its lock.
+    let daemon = d.daemon.clone();
+    let waiting = std::thread::spawn(move || daemon.wait());
 
     assert!(remora_ipc::stop_daemon(d.data.path(), Duration::from_secs(10)).unwrap());
 
-    d.daemon.wait();
+    waiting.join().unwrap();
     assert!(matches!(
         Client::connect(d.data.path()),
         Err(ClientError::DaemonNotRunning)
@@ -176,4 +180,52 @@ fn stop_daemon_stops_a_daemon_without_a_hello() {
         !remora_ipc::stop_daemon(d.data.path(), Duration::from_secs(1)).unwrap(),
         "nothing left to stop"
     );
+}
+
+#[test]
+fn stop_daemon_returns_only_once_a_replacement_can_start() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+    let status = d.status(&mut client);
+    let lock_file = d
+        .data
+        .path()
+        .join("projects")
+        .join(remora_engine::project_id(&status.root))
+        .join("lock");
+    // A request in flight keeps the old daemon (and its instance lock) alive a while.
+    let holder = std::fs::OpenOptions::new().write(true).open(lock_file).unwrap();
+    holder.lock().unwrap();
+    let root = d.root();
+    let slow = std::thread::spawn(move || {
+        client.call(Request::BeforeCommand {
+            root,
+            session: "s1".into(),
+            agent: "claude-code".into(),
+            command: "make".into(),
+            tool_use_id: None,
+        })
+    });
+    std::thread::sleep(Duration::from_millis(200));
+    // As in `remorad run`, a thread waits on the daemon: that is what releases its lock.
+    let daemon = d.daemon.clone();
+    let waiting = std::thread::spawn(move || daemon.wait());
+    let data = d.data.path().to_path_buf();
+    let stopping = std::thread::spawn(move || remora_ipc::stop_daemon(&data, Duration::from_secs(10)));
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        !stopping.is_finished(),
+        "returned while the old daemon still held its lock"
+    );
+    holder.unlock().unwrap();
+
+    assert!(stopping.join().unwrap().unwrap());
+    let replacement = Daemon::start(config(d.data.path(), &d.clock));
+    waiting.join().unwrap();
+    assert!(replacement.is_ok(), "{:?}", replacement.err());
+    let replacement = replacement.unwrap();
+    replacement.shutdown();
+    replacement.wait();
+    assert!(slow.join().unwrap().is_ok());
 }

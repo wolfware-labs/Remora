@@ -588,6 +588,7 @@ dependencies = [
  "remora-engine",
  "remora-ipc",
  "remora-journal",
+ "remora-snap",
  "serde_json",
  "tempfile",
  "thiserror",

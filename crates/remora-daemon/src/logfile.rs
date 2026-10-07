@@ -21,8 +21,13 @@ pub struct LogFile {
 impl LogFile {
     /// Open `<dir>/remorad.log`, creating `dir` owner-only if needed.
     pub fn open(dir: &Path, max_bytes: u64) -> io::Result<Self> {
+        Self::open_named(dir, "remorad.log", max_bytes)
+    }
+
+    /// Open `<dir>/<name>` (rotated to `<name>.1`), creating `dir` owner-only if needed.
+    pub fn open_named(dir: &Path, name: &str, max_bytes: u64) -> io::Result<Self> {
         private_dir(dir)?;
-        let path = dir.join("remorad.log");
+        let path = dir.join(name);
         let file = open_append(&path)?;
         Ok(Self {
             path,
@@ -44,6 +49,11 @@ impl LogFile {
             *file = open_append(&self.path)?;
         }
         writeln!(file, "{line}")
+    }
+
+    /// Append `message` with the current UTC time and `level`, as the daemon's log does.
+    pub fn write_entry(&self, level: &str, message: &str) -> io::Result<()> {
+        self.write_line(&format!("{} {level:<5} {message}", utc(SystemClock.now_ms())))
     }
 }
 
@@ -81,13 +91,9 @@ impl log::Log for FileLogger {
 
     fn log(&self, record: &log::Record<'_>) {
         if self.enabled(record.metadata()) {
-            let line = format!(
-                "{} {:<5} {}",
-                utc(SystemClock.now_ms()),
-                record.level(),
-                record.args()
-            );
-            let _ = self.file.write_line(&line);
+            let _ = self
+                .file
+                .write_entry(record.level().as_str(), &record.args().to_string());
         }
     }
 

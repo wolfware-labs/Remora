@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use remora_engine::{PointKind, RestorePoint, Status};
 use remora_ipc::{
-    ErrorBody, ErrorKind, FailedPath, JournalCheck, Outcome, Request, RequestEnvelope, Response,
+    ErrorBody, ErrorKind, FailedPath, JournalCheck, Outcome, Preview, Request, RequestEnvelope, Response,
     ResponseEnvelope, Rewound,
 };
 use remora_journal::CommandRecord;
@@ -85,6 +85,7 @@ fn every_request_has_a_stable_wire_form() {
             session: "s1".into(),
             agent: "claude-code".into(),
             command: "rm -rf build".into(),
+            tool_use_id: None,
         },
         json!({"type": "before_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code", "command": "rm -rf build"}),
     );
@@ -94,6 +95,7 @@ fn every_request_has_a_stable_wire_form() {
             session: "s1".into(),
             agent: "claude-code".into(),
             command: "ls".into(),
+            tool_use_id: None,
             exit_code: Some(2),
         },
         json!({"type": "after_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code", "command": "ls", "exit_code": 2}),
@@ -129,6 +131,29 @@ fn every_request_has_a_stable_wire_form() {
     request(
         Request::Verify { root: root() },
         json!({"type": "verify", "root": "/home/me/proj"}),
+    );
+    request(
+        Request::EndSession {
+            root: root(),
+            session: "s1".into(),
+            agent: "claude-code".into(),
+        },
+        json!({"type": "end_session", "root": "/home/me/proj", "session": "s1", "agent": "claude-code"}),
+    );
+    request(
+        Request::Preview {
+            root: root(),
+            point: point(),
+        },
+        json!({"type": "preview", "root": "/home/me/proj", "point": point_json()}),
+    );
+    request(
+        Request::RestoreSnapshot {
+            root: root(),
+            snapshot: snap('e'),
+            force: false,
+        },
+        json!({"type": "restore_snapshot", "root": "/home/me/proj", "snapshot": "e".repeat(64), "force": false}),
     );
     request(Request::Shutdown, json!({"type": "shutdown"}));
 }
@@ -245,6 +270,20 @@ fn every_response_has_a_stable_wire_form() {
             },
         },
         json!({"type": "verified", "journal": {"state": "broken", "seq": 2, "reason": "hash_mismatch"}}),
+    );
+    ok(
+        Response::Preview(Preview {
+            restore: vec!["src/main.rs".into()],
+            restore_total: 1,
+            delete: vec![],
+            delete_total: 0,
+            revert: vec!["Cargo.toml".into()],
+            revert_total: 250,
+            commands_after: vec![],
+            commands_omitted: 0,
+        }),
+        json!({"type": "preview", "restore": ["src/main.rs"], "restore_total": 1, "delete": [], "delete_total": 0,
+               "revert": ["Cargo.toml"], "revert_total": 250, "commands_after": [], "commands_omitted": 0}),
     );
     ok(Response::ShuttingDown, json!({"type": "shutting_down"}));
 }
