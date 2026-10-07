@@ -184,22 +184,43 @@ mod platform {
         Ok(format!("gui/{}", run("id", &["-u"])?))
     }
 
+    /// Unload the agent if it is loaded, and wait until launchd has let it go: `bootout`
+    /// returns before the job is gone, and an immediate `bootstrap` then fails.
+    fn unload(domain: &str) -> Result<(), ServiceError> {
+        let target = format!("{domain}/{LAUNCHD_LABEL}");
+        let loaded = || run("launchctl", &["print", &target]).is_ok();
+        if !loaded() {
+            return Ok(());
+        }
+        let bootout = run("launchctl", &["bootout", &target]);
+        for _ in 0..50 {
+            if !loaded() {
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        Err(match bootout {
+            Err(e) => e,
+            Ok(_) => ServiceError::Command {
+                command: format!("launchctl bootout {target}"),
+                detail: "the previous agent was still loaded after 5 seconds".to_owned(),
+            },
+        })
+    }
+
     pub(super) fn install(exe: &Path) -> Result<String, ServiceError> {
         let plist = plist_path()?;
         write_file(&plist, &launchd_plist(exe))?;
         let domain = gui_domain()?;
         // Replace a previous registration, if any.
-        let _ = run("launchctl", &["bootout", &format!("{domain}/{LAUNCHD_LABEL}")]);
+        unload(&domain)?;
         run("launchctl", &["bootstrap", &domain, &plist.to_string_lossy()])?;
         Ok(format!("installed launchd agent {}", plist.display()))
     }
 
     pub(super) fn uninstall() -> Result<String, ServiceError> {
         let plist = plist_path()?;
-        let _ = run(
-            "launchctl",
-            &["bootout", &format!("{}/{LAUNCHD_LABEL}", gui_domain()?)],
-        );
+        unload(&gui_domain()?)?;
         remove_file(&plist)?;
         Ok(format!("removed launchd agent {}", plist.display()))
     }
@@ -251,7 +272,11 @@ mod platform {
     }
 
     pub(super) fn uninstall() -> Result<String, ServiceError> {
-        let _ = run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"]);
+        // Nothing to remove is fine; failing to remove an entry that exists is an error.
+        if run("reg", &["query", RUN_KEY, "/v", RUN_VALUE]).is_err() {
+            return Ok(format!(r"no logon entry {RUN_KEY}\{RUN_VALUE} to remove"));
+        }
+        run("reg", &["delete", RUN_KEY, "/v", RUN_VALUE, "/f"])?;
         Ok(format!(r"removed logon entry {RUN_KEY}\{RUN_VALUE}"))
     }
 
