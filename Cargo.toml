@@ -6,6 +6,7 @@ members = [
     "crates/remora-engine",
     "crates/remora-ipc",
     "crates/remora-daemon",
+    "crates/remora-cli",
 ]
 
 [workspace.package]
@@ -35,10 +36,12 @@ log = { version = "0.4", features = ["std"] }
 interprocess = "2.4"
 widestring = "1"
 ctrlc = { version = "3.5", features = ["termination"] }
+clap = { version = "4.6", features = ["derive", "env"] }
 remora-snap = { path = "crates/remora-snap" }
 remora-journal = { path = "crates/remora-journal" }
 remora-engine = { path = "crates/remora-engine" }
 remora-ipc = { path = "crates/remora-ipc" }
+remora-daemon = { path = "crates/remora-daemon" }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

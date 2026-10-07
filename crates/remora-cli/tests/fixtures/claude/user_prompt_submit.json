@@ -1,0 +1,9 @@
+{
+  "session_id": "0f8c2b1e-7d4a-4c1b-9e2f-5a6b7c8d9e0f",
+  "prompt_id": "550e8400-e29b-41d4-a716-446655440000",
+  "transcript_path": "/home/me/.claude/projects/-home-me-proj/0f8c2b1e.jsonl",
+  "cwd": "/home/me/proj",
+  "permission_mode": "default",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "Clean up the build directory"
+}

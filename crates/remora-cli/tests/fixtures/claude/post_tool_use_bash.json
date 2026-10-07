@@ -1,0 +1,11 @@
+{
+  "session_id": "0f8c2b1e-7d4a-4c1b-9e2f-5a6b7c8d9e0f",
+  "cwd": "/home/me/proj",
+  "permission_mode": "default",
+  "hook_event_name": "PostToolUse",
+  "tool_name": "Bash",
+  "tool_input": { "command": "rm -rf build", "description": "Remove the build directory" },
+  "tool_response": { "stdout": "", "stderr": "", "interrupted": false, "isImage": false },
+  "tool_use_id": "toolu_01ABC123",
+  "duration_ms": 12
+}

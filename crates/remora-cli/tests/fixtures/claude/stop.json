@@ -1,0 +1,10 @@
+{
+  "session_id": "0f8c2b1e-7d4a-4c1b-9e2f-5a6b7c8d9e0f",
+  "cwd": "/home/me/proj",
+  "permission_mode": "default",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "Done: removed the build directory.",
+  "background_tasks": [],
+  "session_crons": []
+}

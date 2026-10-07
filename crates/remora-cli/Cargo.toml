@@ -1,0 +1,30 @@
+[package]
+name = "remora-cli"
+description = "remora: record and rewind what AI coding agents do to a project"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+remora-engine.workspace = true
+remora-ipc.workspace = true
+remora-daemon.workspace = true
+remora-journal.workspace = true
+serde.workspace = true
+# Keeps the key order of the user's Claude Code settings when they are rewritten.
+serde_json = { workspace = true, features = ["preserve_order"] }
+thiserror.workspace = true
+dirs.workspace = true
+clap.workspace = true
+remora-snap.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

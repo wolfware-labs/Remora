@@ -1,0 +1,15 @@
+{
+  "session_id": "0f8c2b1e-7d4a-4c1b-9e2f-5a6b7c8d9e0f",
+  "transcript_path": "/home/me/.claude/projects/-home-me-proj/0f8c2b1e.jsonl",
+  "cwd": "/home/me/proj",
+  "permission_mode": "default",
+  "hook_event_name": "PreToolUse",
+  "tool_name": "Bash",
+  "tool_input": {
+    "command": "rm -rf build",
+    "description": "Remove the build directory",
+    "timeout": 120000,
+    "run_in_background": false
+  },
+  "tool_use_id": "toolu_01ABC123"
+}
