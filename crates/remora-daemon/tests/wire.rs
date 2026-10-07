@@ -98,3 +98,19 @@ fn a_relative_project_folder_is_refused() {
 
     assert_eq!(error_kind(&response), &ErrorKind::InvalidRequest);
 }
+
+#[test]
+fn a_shutdown_whose_answer_cannot_be_delivered_still_stops_the_daemon() {
+    let d = TestDaemon::start();
+    let mut conn = d.raw();
+    conn.get_mut()
+        .write_all(b"{\"v\":1,\"id\":1,\"req\":{\"type\":\"shutdown\"}}\n")
+        .unwrap();
+    drop(conn); // gone before the answer arrives
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while remora_ipc::Client::connect(d.data.path()).is_ok() {
+        assert!(std::time::Instant::now() < deadline, "the daemon kept running");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}

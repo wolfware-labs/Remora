@@ -141,13 +141,20 @@ fn shutdown_lets_the_running_request_finish() {
     std::thread::sleep(Duration::from_millis(200)); // let it reach the worker
     let mut other = d.client();
     assert_eq!(other.call(Request::Shutdown).unwrap(), Response::ShuttingDown);
+    let daemon = d.daemon.clone();
+    let waiting = std::thread::spawn(move || daemon.wait());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !waiting.is_finished(),
+        "wait() returned while a request was still running"
+    );
     holder.unlock().unwrap();
 
+    waiting.join().unwrap();
     assert!(
         matches!(slow.join().unwrap(), Ok(Response::Snapshot { .. })),
         "finished, not cut off"
     );
-    d.daemon.wait();
     assert!(matches!(
         Client::connect(d.data.path()),
         Err(ClientError::DaemonNotRunning)

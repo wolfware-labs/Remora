@@ -95,6 +95,8 @@ impl Daemon {
             wake: Condvar::new(),
             threads: Mutex::new(Vec::new()),
             instance: Mutex::new(Some(instance)),
+            in_flight: Mutex::new(0),
+            answered: Condvar::new(),
         });
         let accept = {
             let shared = Arc::clone(&shared);
@@ -149,6 +151,14 @@ impl DaemonHandle {
         for thread in std::mem::take(&mut *lock(&self.shared.worker_threads)) {
             let _ = thread.join();
         }
+        // The workers are done; let their answers reach the clients before returning.
+        let in_flight = lock(&self.shared.in_flight);
+        drop(
+            self.shared
+                .answered
+                .wait_while(in_flight, |n| *n > 0)
+                .unwrap_or_else(PoisonError::into_inner),
+        );
         drop(lock(&self.shared.instance).take());
         log::info!("remorad stopped");
     }
@@ -176,6 +186,9 @@ struct Shared {
     /// The accept loop and the janitor.
     threads: Mutex<Vec<JoinHandle<()>>>,
     instance: Mutex<Option<File>>,
+    /// Requests read but not yet answered; `wait` returns only once this is zero.
+    in_flight: Mutex<usize>,
+    answered: Condvar,
 }
 
 impl Shared {
@@ -469,14 +482,35 @@ fn serve(stream: Stream, shared: &Shared) {
             return;
         }
         let shutdown = matches!(envelope.req, Request::Shutdown);
+        let in_flight = InFlight::start(shared);
         let reply = shared.handle(envelope.req);
-        if answer(&mut conn, envelope.id, reply).is_err() {
-            return;
-        }
+        let answered = answer(&mut conn, envelope.id, reply);
+        drop(in_flight);
+        // Stop even if the requester left without reading the answer.
         if shutdown {
             shared.shutdown();
             return;
         }
+        if answered.is_err() {
+            return;
+        }
+    }
+}
+
+/// Counts one request from the moment it is handled until its answer is written.
+struct InFlight<'a>(&'a Shared);
+
+impl<'a> InFlight<'a> {
+    fn start(shared: &'a Shared) -> Self {
+        *lock(&shared.in_flight) += 1;
+        Self(shared)
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        *lock(&self.0.in_flight) -= 1;
+        self.0.answered.notify_all();
     }
 }
 
