@@ -10,6 +10,10 @@ homepage.workspace = true
 authors.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "remorad"
+path = "src/main.rs"
+
 [dependencies]
 remora-engine.workspace = true
 remora-ipc.workspace = true
@@ -18,6 +22,8 @@ serde_json.workspace = true
 thiserror.workspace = true
 interprocess.workspace = true
 log.workspace = true
+dirs.workspace = true
+ctrlc.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 widestring.workspace = true

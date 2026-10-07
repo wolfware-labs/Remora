@@ -10,8 +10,11 @@
 
 mod clock;
 mod handler;
+mod logfile;
 mod server;
+pub mod service;
 mod worker;
 
 pub use clock::{Clock, ManualClock, SystemClock};
+pub use logfile::{LOG_ROTATE_BYTES, LogFile, install_logger};
 pub use server::{Daemon, DaemonConfig, DaemonError, DaemonHandle};
