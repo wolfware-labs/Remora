@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use remora_cli::commands::{CliError, Ctx, EXIT_ERROR};
+use remora_cli::commands::{self, CliError, Ctx, EXIT_ERROR};
 use remora_cli::hook;
 
 #[derive(Parser)]
@@ -25,12 +25,35 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Record Claude Code sessions: install its hooks (user-wide) and the login service
+    Init {
+        /// Do not start the daemon at login (hooks still start it when needed)
+        #[arg(long)]
+        no_service: bool,
+    },
+    /// Remove Remora's Claude Code hooks
+    Uninit,
+    /// Start the daemon at login, or stop doing so
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Handle one hook event (run by the agent, not by people)
     #[command(hide = true)]
     Hook { agent: Agent },
     /// Run the daemon in the foreground (how a hook starts it)
     #[command(hide = true)]
     Daemon,
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Start remorad at login, and now
+    Install,
+    /// Stop starting remorad at login, and stop it
+    Uninstall,
+    /// Whether the daemon is running
+    Status,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -96,6 +119,16 @@ fn run(cli: Cli) -> Result<(), CliError> {
         data_dir: data_dir(cli.data_dir)?,
     };
     match cli.command {
+        Command::Init { no_service } => commands::setup::init(&ctx, no_service),
+        Command::Uninit => commands::setup::uninit(),
+        Command::Service { action } => match action {
+            ServiceAction::Install => {
+                println!("{}", commands::service::install()?);
+                Ok(())
+            }
+            ServiceAction::Uninstall => commands::service::uninstall(&ctx),
+            ServiceAction::Status => commands::service::show(&ctx),
+        },
         Command::Hook { .. } => Ok(()),
         Command::Daemon => match remora_daemon::run_in_foreground(&ctx.data_dir) {
             Ok(remora_daemon::Ran::Stopped) => Ok(()),

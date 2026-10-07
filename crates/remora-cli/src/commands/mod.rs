@@ -1,5 +1,8 @@
 //! The `remora` commands people run. Each prints its result and returns a [`CliError`]
-//! carrying the exit code on failure. The commands themselves arrive in later modules.
+//! carrying the exit code on failure.
+
+pub mod service;
+pub mod setup;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
