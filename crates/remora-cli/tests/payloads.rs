@@ -123,3 +123,13 @@ fn a_payload_that_is_not_json_is_an_error() {
     assert!(parse("not json").is_err());
     assert!(parse(r#"{"no_event_name": true}"#).is_err());
 }
+
+#[test]
+fn a_payload_without_session_or_folder_is_an_error_and_an_empty_session_is_ignored() {
+    assert!(parse(r#"{"hook_event_name": "Stop", "cwd": "/p"}"#).is_err());
+    assert!(parse(r#"{"hook_event_name": "Stop", "session_id": "s"}"#).is_err());
+    assert_eq!(
+        parse(r#"{"hook_event_name": "Stop", "session_id": "", "cwd": "/p"}"#).unwrap(),
+        HookEvent::Ignored
+    );
+}

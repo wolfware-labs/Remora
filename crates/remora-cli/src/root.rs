@@ -17,9 +17,16 @@ pub enum Root {
 
 /// The root protecting `dir`: the nearest ancestor (or `dir` itself) holding a `.git`
 /// directory or file. A `.git` file marks a linked worktree or submodule, which is its own
-/// root.
+/// root. A relative `dir` is never in a repository: it would resolve against whatever
+/// directory this process happens to run in.
 pub fn resolve(dir: &Path) -> Root {
-    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    if !dir.is_absolute() {
+        return Root::NotInGit;
+    }
+    // A folder the agent deleted still resolves to its repository's canonical root.
+    let Some(dir) = canonical_prefix(dir) else {
+        return Root::NotInGit;
+    };
     for candidate in dir.ancestors() {
         if candidate.join(".git").symlink_metadata().is_ok() {
             return if candidate.join(IGNORE_FILE).symlink_metadata().is_ok() {
@@ -30,6 +37,19 @@ pub fn resolve(dir: &Path) -> Root {
         }
     }
     Root::NotInGit
+}
+
+/// `path` with its deepest existing ancestor canonicalized and the missing rest appended.
+fn canonical_prefix(path: &Path) -> Option<PathBuf> {
+    let mut missing = Vec::new();
+    let mut existing = path;
+    loop {
+        if let Ok(base) = existing.canonicalize() {
+            return Some(missing.iter().rev().fold(base, |path, part| path.join(part)));
+        }
+        missing.push(existing.file_name()?);
+        existing = existing.parent()?;
+    }
 }
 
 #[cfg(test)]
@@ -93,6 +113,23 @@ mod tests {
         let repo = repo();
         let gone = repo.path().join("deleted/by/the/agent");
 
-        assert_eq!(resolve(&gone), Root::Repo(repo.path().to_path_buf()));
+        assert_eq!(resolve(&gone), Root::Repo(canonical(repo.path())));
+    }
+
+    #[test]
+    fn a_relative_or_empty_folder_is_not_in_git() {
+        assert_eq!(resolve(Path::new("")), Root::NotInGit);
+        assert_eq!(resolve(Path::new("some/relative/dir")), Root::NotInGit);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_folder_resolves_to_the_real_repository() {
+        let repo = repo();
+        let links = tempfile::TempDir::new().unwrap();
+        let link = links.path().join("proj");
+        std::os::unix::fs::symlink(repo.path(), &link).unwrap();
+
+        assert_eq!(resolve(&link), Root::Repo(canonical(repo.path())));
     }
 }

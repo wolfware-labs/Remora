@@ -51,9 +51,7 @@ pub struct ParseError(#[from] serde_json::Error);
 #[derive(Deserialize)]
 struct Payload {
     hook_event_name: String,
-    #[serde(default)]
     session_id: String,
-    #[serde(default)]
     cwd: PathBuf,
     #[serde(default)]
     prompt: Option<String>,
@@ -82,6 +80,10 @@ struct ToolInput {
 /// Parse one hook payload.
 pub fn parse(json: &str) -> Result<HookEvent, ParseError> {
     let p: Payload = serde_json::from_str(json)?;
+    // Without a session there is nothing to record a turn under.
+    if p.session_id.is_empty() {
+        return Ok(HookEvent::Ignored);
+    }
     let session = p.session_id.clone();
     let cwd = p.cwd.clone();
     let bash_command = || -> Option<String> {
