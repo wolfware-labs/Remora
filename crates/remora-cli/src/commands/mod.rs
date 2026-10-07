@@ -1,8 +1,12 @@
 //! The `remora` commands people run. Each prints its result and returns a [`CliError`]
 //! carrying the exit code on failure.
 
+pub mod log;
+pub mod rewind;
 pub mod service;
 pub mod setup;
+pub mod status;
+pub mod verify;
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
