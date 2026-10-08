@@ -6,7 +6,7 @@ use remora_ipc::{Client, ClientError, ErrorKind, Preview, Request, Response, Rew
 use remora_snap::SnapshotId;
 
 use super::{
-    CliError, Ctx, EXIT_ERROR, EXIT_REFUSED, EXIT_USAGE, ago, kind_name, now_ms, one_line, open_sessions,
+    CliError, Ctx, EXIT_ERROR, EXIT_REFUSED, EXIT_USAGE, ago, now_ms, one_line, open_sessions, point_kind,
     points_page, short_session, unexpected,
 };
 
@@ -172,9 +172,14 @@ fn print_preview(n: usize, point: &RestorePoint, preview: &Preview) {
         .unwrap_or_default();
     println!(
         "Rewind to #{n}  ·  {}{label}  ·  {}",
-        kind_name(point.kind),
+        point_kind(point),
         ago(now_ms(), point.at_ms)
     );
+    if point.late {
+        println!(
+            "  this point was taken after the command may have started: it may already include its effects"
+        );
+    }
     let line = |verb: &str, paths: &[String], total: usize, note: &str| {
         if total > 0 {
             let shown: Vec<_> = paths.iter().take(3).map(String::as_str).collect();

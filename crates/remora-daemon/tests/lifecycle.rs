@@ -125,6 +125,7 @@ fn shutdown_lets_the_running_request_finish() {
             agent: "claude-code".into(),
             command: "make".into(),
             tool_use_id: None,
+            deadline_ms: None,
         })
     });
     std::thread::sleep(Duration::from_millis(200)); // let it reach the worker
@@ -193,6 +194,7 @@ fn stop_daemon_returns_only_once_a_replacement_can_start() {
             agent: "claude-code".into(),
             command: "make".into(),
             tool_use_id: None,
+            deadline_ms: None,
         })
     });
     std::thread::sleep(Duration::from_millis(200));
@@ -216,4 +218,18 @@ fn stop_daemon_returns_only_once_a_replacement_can_start() {
     replacement.shutdown();
     replacement.wait();
     assert!(slow.join().unwrap().is_ok());
+}
+
+#[test]
+fn a_checkpoint_finished_after_the_hook_gave_up_is_marked_late() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+
+    d.before_by(&mut client, "s1", "make", START_MS + 60_000);
+    d.clock.advance(Duration::from_secs(120));
+    d.before_by(&mut client, "s1", "rm -rf build", START_MS + 60_000);
+
+    let late: Vec<_> = d.points(&mut client).iter().map(|p| p.late).collect();
+    assert_eq!(late, [true, false, false], "newest first: rm (late), make, turn");
 }

@@ -149,6 +149,17 @@ pub fn kind_name(kind: PointKind) -> &'static str {
     }
 }
 
+/// A point's kind for people, with "(late)" when its checkpoint finished after the agent
+/// stopped waiting.
+pub fn point_kind(point: &RestorePoint) -> String {
+    let kind = kind_name(point.kind);
+    if point.late {
+        format!("{kind} (late)")
+    } else {
+        kind.to_owned()
+    }
+}
+
 /// A label on one line, at most `max` characters.
 pub fn one_line(label: &str, max: usize) -> String {
     let flat: String = label.split_whitespace().collect::<Vec<_>>().join(" ");

@@ -90,6 +90,21 @@ impl TestDaemon {
                 agent: "claude-code".into(),
                 command: command.into(),
                 tool_use_id: None,
+                deadline_ms: None,
+            })
+            .unwrap()
+    }
+
+    /// `before` from a hook that gives up waiting at `deadline_ms`.
+    pub fn before_by(&self, client: &mut Client, session: &str, command: &str, deadline_ms: i64) -> Response {
+        client
+            .call(Request::BeforeCommand {
+                root: self.root(),
+                session: session.into(),
+                agent: "claude-code".into(),
+                command: command.into(),
+                tool_use_id: None,
+                deadline_ms: Some(deadline_ms),
             })
             .unwrap()
     }

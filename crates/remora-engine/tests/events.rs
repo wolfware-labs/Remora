@@ -284,6 +284,44 @@ fn a_result_for_an_unknown_tool_use_id_changes_nothing() {
 }
 
 #[test]
+fn a_late_checkpoint_is_labelled_in_the_journal_and_its_restore_point() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), None, 1_000).unwrap();
+    p.before_command(&agent(), "make", Some("toolu_a"), 1_100)
+        .unwrap();
+    p.before_command(&agent(), "rm -rf build", Some("toolu_b"), 1_200)
+        .unwrap();
+
+    p.mark_late(&agent(), Some("toolu_b")).unwrap();
+
+    let late: Vec<_> = p.restore_points().unwrap().iter().map(|pt| pt.late).collect();
+    assert_eq!(late, [true, false, false], "newest first: rm, make, turn");
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+    let late: Vec<_> = entry.record.commands.iter().map(|c| c.late).collect();
+    assert_eq!(late, [None, Some(true)]);
+    let late: Vec<_> = p.restore_points().unwrap().iter().map(|pt| pt.late).collect();
+    assert_eq!(late, [true, false, false], "still labelled once journaled");
+}
+
+#[test]
+fn marking_without_an_id_labels_the_latest_command_and_an_unknown_id_nothing() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), None, 1_000).unwrap();
+    p.before_command(&agent(), "make", None, 1_100).unwrap();
+    p.before_command(&agent(), "ls", None, 1_200).unwrap();
+
+    p.mark_late(&agent(), Some("toolu_zzz")).unwrap();
+    p.mark_late(&agent(), None).unwrap();
+
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+    let late: Vec<_> = entry.record.commands.iter().map(|c| c.late).collect();
+    assert_eq!(late, [None, Some(true)]);
+    p.mark_late(&agent(), None).unwrap(); // no open turn: nothing to mark, no error
+}
+
+#[test]
 fn ending_a_session_closes_its_open_turn_as_interrupted() {
     let fx = Fixture::new();
     let mut p = fx.open();

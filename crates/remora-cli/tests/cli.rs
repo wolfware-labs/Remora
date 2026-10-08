@@ -268,3 +268,29 @@ fn a_relative_or_subfolder_root_means_its_repository() {
     assert!(from_dot.contains("rm -rf src"), "{from_dot}");
     assert_eq!(from_sub, from_dot);
 }
+
+#[test]
+fn a_late_checkpoint_is_labelled_in_log_and_its_preview_warns() {
+    let s = Setup::new();
+    let cwd = s.repo.path().to_path_buf();
+    s.write("src/main.rs", "fn main() {}");
+    assert!(s.hook(&prompt(&cwd, "build")).status.success());
+    // A hook that had already given up when the checkpoint finished.
+    let mut client = remora_ipc::Client::connect(s.data.path()).unwrap();
+    client
+        .call(remora_ipc::Request::BeforeCommand {
+            root: s.root(),
+            session: common::SESSION.into(),
+            agent: "claude-code".into(),
+            command: "make".into(),
+            tool_use_id: Some("toolu_1".into()),
+            deadline_ms: Some(0),
+        })
+        .unwrap();
+
+    let listing = stdout(&s.remora(&["log"]));
+    assert!(listing.contains("before command (late)"), "{listing}");
+    let rewind = s.remora(&["rewind", "#1", "--yes", "--force"]);
+    let out = stdout(&rewind);
+    assert!(out.contains("taken after the command may have started"), "{out}");
+}

@@ -98,7 +98,6 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     if session_ends {
         sessions.remove(&session);
     }
-    let request = to_request(event, root)?;
     // Starting a daemon when a session ends only makes Claude Code wait on exit.
     let env = &HookEnv {
         remora: if session_ends { None } else { env.remora.clone() },
@@ -111,7 +110,9 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     };
     // One budget for the whole hook: connecting, starting a daemon (twice at most), and
     // the call itself.
-    let deadline = Instant::now() + 2 * env.start_wait + timeout;
+    let budget = 2 * env.start_wait + timeout;
+    let deadline = Instant::now() + budget;
+    let request = to_request(event, root, epoch_ms(SystemTime::now() + budget))?;
     let answer = connect(env, timeout, deadline).and_then(|client| {
         let left = deadline.saturating_duration_since(Instant::now());
         client
@@ -140,7 +141,10 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
 }
 
 /// The daemon request for `event`; `None` for events Remora does not record.
-fn to_request(event: HookEvent, root: PathBuf) -> Option<Request> {
+///
+/// `deadline_ms` is when this hook gives up: a checkpoint the daemon finishes after it may
+/// already contain the command's effects, so the daemon marks it late.
+fn to_request(event: HookEvent, root: PathBuf, deadline_ms: i64) -> Option<Request> {
     let agent = AGENT.to_owned();
     Some(match event {
         HookEvent::PromptSubmitted { session, prompt, .. } => Request::BeginTurn {
@@ -160,6 +164,7 @@ fn to_request(event: HookEvent, root: PathBuf) -> Option<Request> {
             agent,
             command,
             tool_use_id,
+            deadline_ms: Some(deadline_ms),
         },
         HookEvent::AfterBash {
             session,
@@ -179,6 +184,12 @@ fn to_request(event: HookEvent, root: PathBuf) -> Option<Request> {
         HookEvent::SessionEnded { session, .. } => Request::EndSession { root, session, agent },
         HookEvent::Ignored => return None,
     })
+}
+
+/// Milliseconds since the Unix epoch, as the daemon's clock counts them.
+fn epoch_ms(at: SystemTime) -> i64 {
+    at.duration_since(SystemTime::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// A short reason key (for the once-per-session marker) and a sentence for people.

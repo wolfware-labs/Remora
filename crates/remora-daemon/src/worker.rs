@@ -23,6 +23,7 @@ pub(crate) enum Job {
         session: SessionRef,
         command: String,
         tool_use_id: Option<String>,
+        deadline_ms: Option<i64>,
     },
     AfterCommand {
         session: SessionRef,
@@ -86,6 +87,11 @@ pub(crate) struct Open {
 }
 
 impl Open {
+    /// The clock's time now (not adjusted: for comparing with a client's deadline).
+    pub(crate) fn now_ms(&self) -> i64 {
+        self.clock.now_ms()
+    }
+
     /// The time for the next event: never earlier than any event already recorded.
     pub(crate) fn at_ms(&mut self) -> i64 {
         self.times.next(self.clock.now_ms())

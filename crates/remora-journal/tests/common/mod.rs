@@ -36,6 +36,7 @@ pub fn record(prompt: &str) -> EntryRecord {
             snapshot_id: None,
             at_ms: None,
             tool_use_id: None,
+            late: None,
         }],
         changes: vec![FileChange {
             path: "src/lib.rs".into(),

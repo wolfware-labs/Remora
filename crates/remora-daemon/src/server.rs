@@ -281,12 +281,14 @@ impl Shared {
                 agent,
                 command,
                 tool_use_id,
+                deadline_ms,
             } => self.run(
                 &root,
                 Job::BeforeCommand {
                     session: SessionRef::new(session, agent),
                     command,
                     tool_use_id,
+                    deadline_ms,
                 },
             ),
             Request::AfterCommand {

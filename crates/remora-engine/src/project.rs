@@ -60,6 +60,10 @@ pub struct RestorePoint {
     pub label: Option<String>,
     /// True if the point belongs to a turn that has not ended yet.
     pub open: bool,
+    /// A checkpoint taken after the agent stopped waiting for it: the command may already
+    /// have started, so the point may include its effects.
+    #[serde(default)]
+    pub late: bool,
 }
 
 #[derive(Debug)]
@@ -228,6 +232,7 @@ impl Project {
             snapshot_id: Some(checkpoint.to_string()),
             at_ms: Some(at_ms),
             tool_use_id: tool_use_id.map(str::to_owned),
+            late: None,
         });
         turn.last_event_ms = Some(at_ms);
         session::save(&path, &turn)?;
@@ -271,6 +276,30 @@ impl Project {
             Some(turn) => self.close_turn(turn, at_ms, false).map(Some),
             None => Ok(None),
         }
+    }
+
+    /// Mark a command's checkpoint as late: it finished after the agent stopped waiting, so
+    /// the command may already have started. The command is the one with `tool_use_id`, or
+    /// the session's latest command without one. Ignored if there is no such command.
+    pub fn mark_late(&mut self, session: &SessionRef, tool_use_id: Option<&str>) -> Result<(), EngineError> {
+        session::check_session_id(&session.id)?;
+        let _lock = self.lock()?;
+        let path = session::path_for(&self.sessions_dir(), &session.id);
+        if let Some(mut turn) = session::load(&path)? {
+            let command = match tool_use_id {
+                Some(id) => turn
+                    .commands
+                    .iter_mut()
+                    .rev()
+                    .find(|c| c.tool_use_id.as_deref() == Some(id)),
+                None => turn.commands.last_mut(),
+            };
+            if let Some(command) = command {
+                command.late = Some(true);
+                session::save(&path, &turn)?;
+            }
+        }
+        Ok(())
     }
 
     /// The agent's session ended: close its open turn, if any, as interrupted (a turn that
@@ -383,6 +412,7 @@ impl Project {
                                 at_ms: r.started_at_ms,
                                 label: r.rewind_target.clone(),
                                 open: false,
+                                late: false,
                             }),
                         ));
                     }
@@ -629,21 +659,23 @@ struct TurnView<'a> {
 }
 
 fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), EngineError> {
-    let point = |at_ms: i64, snapshot: &str, kind, label: Option<&str>| -> Result<Item, EngineError> {
-        Ok(Item::Point(RestorePoint {
-            position: 0,
-            snapshot: SnapshotId::parse(snapshot)?,
-            kind,
-            session_id: turn.session_id.to_owned(),
-            at_ms,
-            label: label.map(short_label),
-            open: turn.open,
-        }))
-    };
+    let point =
+        |at_ms: i64, snapshot: &str, kind, label: Option<&str>, late: bool| -> Result<Item, EngineError> {
+            Ok(Item::Point(RestorePoint {
+                position: 0,
+                snapshot: SnapshotId::parse(snapshot)?,
+                kind,
+                session_id: turn.session_id.to_owned(),
+                at_ms,
+                label: label.map(short_label),
+                open: turn.open,
+                late,
+            }))
+        };
     if let Some(pre) = turn.pre_snapshot {
         events.push((
             turn.at_ms,
-            point(turn.at_ms, pre, PointKind::TurnStart, turn.prompt)?,
+            point(turn.at_ms, pre, PointKind::TurnStart, turn.prompt, false)?,
         ));
     }
     for cmd in turn.commands {
@@ -652,7 +684,13 @@ fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), E
         if let Some(checkpoint) = &cmd.snapshot_id {
             events.push((
                 at_ms,
-                point(at_ms, checkpoint, PointKind::BeforeCommand, Some(&cmd.command))?,
+                point(
+                    at_ms,
+                    checkpoint,
+                    PointKind::BeforeCommand,
+                    Some(&cmd.command),
+                    cmd.late == Some(true),
+                )?,
             ));
         }
         events.push((at_ms, Item::Command(cmd.clone())));

@@ -24,12 +24,13 @@ fn point() -> RestorePoint {
         at_ms: 1_100,
         label: Some("rm -rf build".into()),
         open: false,
+        late: false,
     }
 }
 
 fn point_json() -> Value {
     json!({"position": 3, "snapshot": "a".repeat(64), "kind": "before_command", "session_id": "s1",
-           "at_ms": 1100, "label": "rm -rf build", "open": false})
+           "at_ms": 1100, "label": "rm -rf build", "open": false, "late": false})
 }
 
 /// `value` serializes to exactly `expected`, and `expected` deserializes back to `value`.
@@ -91,9 +92,10 @@ fn every_request_has_a_stable_wire_form() {
             agent: "claude-code".into(),
             command: "rm -rf build".into(),
             tool_use_id: Some("toolu_1".into()),
+            deadline_ms: Some(1_760_000_030_000),
         },
         json!({"type": "before_command", "root": "/home/me/proj", "session": "s1", "agent": "claude-code",
-               "command": "rm -rf build", "tool_use_id": "toolu_1"}),
+               "command": "rm -rf build", "tool_use_id": "toolu_1", "deadline_ms": 1_760_000_030_000_i64}),
     );
     request(
         Request::AfterCommand {
@@ -244,6 +246,7 @@ fn every_response_has_a_stable_wire_form() {
                 snapshot_id: None,
                 at_ms: Some(2_000),
                 tool_use_id: None,
+                late: None,
             }],
             commands_omitted: 3,
             seq: 9,

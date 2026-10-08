@@ -71,6 +71,8 @@ pub enum Request {
         prompt: Option<String>,
     },
     /// `tool_use_id`, when the agent has one, pairs the command with its `after_command`.
+    /// `deadline_ms` (milliseconds since the epoch) is when the agent stops waiting: a
+    /// checkpoint finished later is marked `late`.
     BeforeCommand {
         root: PathBuf,
         session: String,
@@ -78,6 +80,8 @@ pub enum Request {
         command: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_use_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<i64>,
     },
     AfterCommand {
         root: PathBuf,

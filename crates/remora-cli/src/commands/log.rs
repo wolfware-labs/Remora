@@ -2,7 +2,7 @@ use std::path::Path;
 
 use remora_ipc::MAX_POINTS;
 
-use super::{CliError, Ctx, ago, kind_name, now_ms, one_line, points_page, short_session};
+use super::{CliError, Ctx, ago, now_ms, one_line, point_kind, points_page, short_session};
 
 /// `remora log`: restore points, `#1` newest.
 pub fn run(ctx: &Ctx, root: &Path, count: usize, all: bool, json: bool) -> Result<(), CliError> {
@@ -48,10 +48,10 @@ pub fn run(ctx: &Ctx, root: &Path, count: usize, all: bool, json: bool) -> Resul
             .unwrap_or_default();
         let open = if point.open { "  [open]" } else { "" };
         println!(
-            "#{:<4} {:<12} {:<15} {}  {label}{open}",
+            "#{:<4} {:<12} {:<21} {}  {label}{open}",
             i + 1,
             ago(now, point.at_ms),
-            kind_name(point.kind),
+            point_kind(point),
             short_session(&point.session_id)
         );
     }

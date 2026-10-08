@@ -37,6 +37,10 @@ pub struct CommandRecord {
     /// The agent's id for this tool call, pairing the command with its result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
+    /// The checkpoint finished after the agent stopped waiting for it, so the command may
+    /// already have started: it may include the command's effects.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
