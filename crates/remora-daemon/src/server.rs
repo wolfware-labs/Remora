@@ -63,6 +63,8 @@ pub enum DaemonError {
         #[source]
         source: io::Error,
     },
+    #[error("unsafe socket directory {0}: it must be yours and closed to other users")]
+    UnsafeSocketDir(PathBuf),
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -91,6 +93,12 @@ impl Daemon {
             source,
         })?;
         let endpoint = endpoint(&data_dir);
+        #[cfg(unix)]
+        if let Endpoint::Socket(path) = &endpoint
+            && let Some(dir) = path.parent().filter(|dir| *dir != data_dir)
+        {
+            private_socket_dir(dir, &data_dir)?;
+        }
         let listener = listen(&endpoint)?;
         let shared = Arc::new(Shared {
             ctx: Arc::new(Context {
@@ -451,14 +459,83 @@ fn listen(endpoint: &Endpoint) -> Result<Listener, DaemonError> {
     Ok(listener)
 }
 
-/// A protected DACL granting access to the pipe's owner (the user running the daemon) and
-/// SYSTEM only. Without it, named pipes are readable by everyone.
+/// Make sure the directory holding a socket outside the data directory is the user's own and
+/// closed to others (creating it so), as the data directory is.
+#[cfg(unix)]
+fn private_socket_dir(dir: &Path, data_dir: &Path) -> Result<(), DaemonError> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    let io_error = |source| DaemonError::Io {
+        path: dir.to_path_buf(),
+        source,
+    };
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(io_error(e)),
+    }
+    let owner = fs::metadata(data_dir)
+        .map_err(|source| DaemonError::Io {
+            path: data_dir.to_path_buf(),
+            source,
+        })?
+        .uid();
+    // Not followed: a link could point anywhere.
+    let meta = fs::symlink_metadata(dir).map_err(io_error)?;
+    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o077 != 0 {
+        return Err(DaemonError::UnsafeSocketDir(dir.to_path_buf()));
+    }
+    Ok(())
+}
+
+/// A protected DACL granting access to the user running the daemon and SYSTEM only.
+/// Without it, named pipes are readable by everyone.
 #[cfg(windows)]
 fn owner_only() -> io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-    let sddl = widestring::U16CString::from_str("D:P(A;;GA;;;OW)(A;;GA;;;SY)")
+    let sid = user_sid();
+    if sid.is_none() {
+        log::warn!("cannot read the user's SID with whoami: the pipe admits its owner only");
+    }
+    let sddl = widestring::U16CString::from_str(pipe_sddl(sid.as_deref()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     SecurityDescriptor::deserialize(&sddl)
+}
+
+/// The SID of the user running this process, from `whoami`. An elevated daemon's pipe owner
+/// is the Administrators group, so naming the user lets the same user's non-elevated
+/// clients in.
+#[cfg(windows)]
+fn user_sid() -> Option<String> {
+    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let output = std::process::Command::new(Path::new(&root).join(r"System32\whoami.exe"))
+        .args(["/user", "/fo", "csv", "/nh"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_whoami_sid(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// The SID in `whoami /user /fo csv /nh` output (`"host\user","S-1-5-21-…"`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn parse_whoami_sid(output: &str) -> Option<String> {
+    let field = output.trim().rsplit(',').next()?.trim().trim_matches('"');
+    let valid = field.strip_prefix("S-1-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .split('-')
+                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    valid.then(|| field.to_owned())
+}
+
+/// The pipe's security descriptor: the user's SID when known, else the pipe's owner (`OW`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn pipe_sddl(sid: Option<&str>) -> String {
+    format!("D:P(A;;GA;;;{})(A;;GA;;;SY)", sid.unwrap_or("OW"))
 }
 
 fn accept_loop(listener: &Listener, shared: &Arc<Shared>) {
@@ -646,4 +723,37 @@ fn request_id(line: &str) -> u64 {
         .ok()
         .and_then(|v| v.get("id").and_then(serde_json::Value::as_u64))
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_user_sid_is_read_from_whoami() {
+        let out = "\"desktop-7q2\\o'neil\",\"S-1-5-21-3623811015-3361044348-30300820-1013\"\r\n";
+        assert_eq!(
+            parse_whoami_sid(out).as_deref(),
+            Some("S-1-5-21-3623811015-3361044348-30300820-1013")
+        );
+        for bad in [
+            "",
+            "\"host\\me\"",
+            "\"host\\me\",\"S-1-\"",
+            "\"me\",\"S-1-5-x\"",
+            "\"me\",\"S-1-5-\"",
+            "\"me\",\"S-1-5-21)(A;;GA;;;WD\"",
+        ] {
+            assert_eq!(parse_whoami_sid(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_pipe_admits_the_user_and_system_only() {
+        assert_eq!(
+            pipe_sddl(Some("S-1-5-21-1-2-3-1013")),
+            "D:P(A;;GA;;;S-1-5-21-1-2-3-1013)(A;;GA;;;SY)"
+        );
+        assert_eq!(pipe_sddl(None), "D:P(A;;GA;;;OW)(A;;GA;;;SY)");
+    }
 }

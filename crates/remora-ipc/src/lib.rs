@@ -19,7 +19,7 @@ mod framing;
 mod protocol;
 
 pub use client::{Client, ClientError, DEFAULT_TIMEOUT, stop_daemon};
-pub use endpoint::{Endpoint, endpoint};
+pub use endpoint::{Endpoint, MAX_SOCKET_PATH, endpoint};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
     DEFAULT_POINTS, ErrorBody, ErrorKind, FailedPath, JournalCheck, MAX_COMMANDS_AFTER, MAX_MESSAGE_BYTES,
