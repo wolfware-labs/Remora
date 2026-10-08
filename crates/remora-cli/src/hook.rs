@@ -110,14 +110,15 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     };
     // One budget for the whole hook: connecting, starting a daemon (twice at most), and
     // the call itself.
-    let budget = 2 * env.start_wait + timeout;
-    let deadline = Instant::now() + budget;
-    let request = to_request(event, root, epoch_ms(SystemTime::now() + budget))?;
+    let deadline = Instant::now() + 2 * env.start_wait + timeout;
+    let request = to_request(event, root)?;
     let answer = connect(env, timeout, deadline).and_then(|client| {
         let left = deadline.saturating_duration_since(Instant::now());
+        let wait = timeout.min(left).max(Duration::from_millis(10));
+        // The daemon marks the checkpoint late if it is ready only after this hook stopped waiting.
         client
-            .with_timeout(timeout.min(left).max(Duration::from_millis(10)))
-            .call(request)
+            .with_timeout(wait)
+            .call(with_deadline(request, epoch_ms(SystemTime::now() + wait)))
     });
     match answer {
         Ok(_) => None,
@@ -141,10 +142,7 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
 }
 
 /// The daemon request for `event`; `None` for events Remora does not record.
-///
-/// `deadline_ms` is when this hook gives up: a checkpoint the daemon finishes after it may
-/// already contain the command's effects, so the daemon marks it late.
-fn to_request(event: HookEvent, root: PathBuf, deadline_ms: i64) -> Option<Request> {
+fn to_request(event: HookEvent, root: PathBuf) -> Option<Request> {
     let agent = AGENT.to_owned();
     Some(match event {
         HookEvent::PromptSubmitted { session, prompt, .. } => Request::BeginTurn {
@@ -164,7 +162,7 @@ fn to_request(event: HookEvent, root: PathBuf, deadline_ms: i64) -> Option<Reque
             agent,
             command,
             tool_use_id,
-            deadline_ms: Some(deadline_ms),
+            deadline_ms: None,
         },
         HookEvent::AfterBash {
             session,
@@ -190,6 +188,16 @@ fn to_request(event: HookEvent, root: PathBuf, deadline_ms: i64) -> Option<Reque
 fn epoch_ms(at: SystemTime) -> i64 {
     at.duration_since(SystemTime::UNIX_EPOCH)
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// `request` with the time this hook stops waiting for it, for requests that take one:
+/// a checkpoint the daemon finishes later may already contain the command's effects, so
+/// the daemon marks it late.
+fn with_deadline(mut request: Request, at_ms: i64) -> Request {
+    if let Request::BeforeCommand { deadline_ms, .. } = &mut request {
+        *deadline_ms = Some(at_ms);
+    }
+    request
 }
 
 /// A short reason key (for the once-per-session marker) and a sentence for people.
@@ -352,4 +360,43 @@ fn private_dir(dir: &Path) -> std::io::Result<()> {
         builder.mode(0o700);
     }
     builder.create(dir)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn with_deadline_sets_deadline_ms_on_before_command_and_leaves_others_unchanged() {
+        let path = PathBuf::from("/tmp");
+        let before_cmd = Request::BeforeCommand {
+            root: path.clone(),
+            session: "s1".into(),
+            agent: "test".into(),
+            command: "make".into(),
+            tool_use_id: None,
+            deadline_ms: None,
+        };
+        let deadline = 1_000_000_000_i64;
+        let updated = with_deadline(before_cmd.clone(), deadline);
+        #[allow(clippy::unwrap_used)]
+        if let Request::BeforeCommand { deadline_ms, .. } = updated {
+            assert_eq!(deadline_ms, Some(deadline));
+        } else {
+            panic!("expected BeforeCommand");
+        }
+
+        let end_turn = Request::EndTurn {
+            root: path,
+            session: "s1".into(),
+            agent: "test".into(),
+        };
+        let unchanged = with_deadline(end_turn, deadline);
+        #[allow(clippy::unwrap_used)]
+        if let Request::EndTurn { .. } = unchanged {
+            // EndTurn should be unchanged
+        } else {
+            panic!("expected EndTurn");
+        }
+    }
 }
