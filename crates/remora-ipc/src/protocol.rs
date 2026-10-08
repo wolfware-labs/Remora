@@ -51,10 +51,17 @@ pub enum Outcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Request {
-    /// Exchange versions. Answered with [`Response::Hello`] or a `version_mismatch` error.
+    /// The first message on a connection: versions, and the client's challenge (`nonce`) the
+    /// daemon must answer to prove it knows the secret (see [`crate::auth`]).
     Hello {
         client_version: String,
         protocol: u32,
+        nonce: String,
+    },
+    /// The client's answer to the daemon's challenge. Until it is accepted, every other
+    /// request is refused with `unauthenticated`.
+    Prove {
+        proof: String,
     },
     BeginTurn {
         root: PathBuf,
@@ -136,10 +143,16 @@ pub enum Request {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Response {
+    /// The daemon's versions, its answer to the client's challenge (`proof`) and its own
+    /// challenge (`nonce`).
     Hello {
         daemon_version: String,
         protocol: u32,
+        nonce: String,
+        proof: String,
     },
+    /// The client's proof was accepted.
+    Authenticated,
     /// `begin_turn` and `before_command`: the snapshot just taken.
     Snapshot {
         snapshot: SnapshotId,
@@ -239,6 +252,8 @@ pub enum ErrorKind {
     InvalidRequest,
     /// The client speaks another protocol version.
     VersionMismatch,
+    /// The connection has not proved it knows the secret.
+    Unauthenticated,
     TurnInProgress {
         session: String,
     },

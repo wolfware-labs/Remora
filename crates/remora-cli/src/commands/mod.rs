@@ -45,6 +45,10 @@ impl From<ClientError> for CliError {
                 EXIT_NO_DAEMON,
                 "the Remora daemon is not running: run `remora service install` (or `remorad run`)",
             ),
+            ClientError::Impostor => CliError::new(
+                EXIT_NO_DAEMON,
+                "something other than your Remora daemon answers on its endpoint: stop it, then run `remora service install`",
+            ),
             ClientError::Daemon(body) if matches!(body.kind, ErrorKind::TurnInProgress { .. }) => {
                 CliError::new(EXIT_REFUSED, body.message)
             }

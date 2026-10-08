@@ -11,6 +11,7 @@ use std::time::Duration;
 use interprocess::local_socket::traits::{Listener as _, Stream as _};
 use interprocess::local_socket::{Listener, ListenerOptions, Stream};
 use remora_engine::{Engine, EngineError, SessionRef};
+use remora_ipc::auth::{self, Secret};
 use remora_ipc::{
     Endpoint, ErrorBody, ErrorKind, FrameError, MAX_MESSAGE_BYTES, Outcome, PROTOCOL_VERSION, Request,
     RequestEnvelope, Response, ResponseEnvelope, endpoint, read_frame, write_frame,
@@ -80,6 +81,15 @@ impl Daemon {
         let engine = Engine::open(&config.data_dir)?;
         let data_dir = engine.data_dir().to_path_buf();
         let instance = instance_lock(&data_dir)?;
+        // A fresh secret for every run: a client must prove it can read this data directory.
+        let secret = Secret::generate().map_err(|source| DaemonError::Io {
+            path: data_dir.clone(),
+            source,
+        })?;
+        secret.store(&data_dir).map_err(|source| DaemonError::Io {
+            path: data_dir.join(auth::SECRET_FILE),
+            source,
+        })?;
         let endpoint = endpoint(&data_dir);
         let listener = listen(&endpoint)?;
         let shared = Arc::new(Shared {
@@ -98,6 +108,7 @@ impl Daemon {
             threads: Mutex::new(Vec::new()),
             waker: Mutex::new(None),
             instance: Mutex::new(Some(instance)),
+            secret,
             in_flight: Mutex::new(0),
             answered: Condvar::new(),
         });
@@ -186,6 +197,8 @@ struct Workers {
 }
 
 struct Shared {
+    /// The secret clients prove they know (see `remora_ipc::auth`).
+    secret: Secret,
     ctx: Arc<Context>,
     data_dir: PathBuf,
     endpoint: Endpoint,
@@ -244,16 +257,11 @@ impl Shared {
 
     fn handle(&self, request: Request) -> Reply {
         match request {
-            Request::Hello { protocol, .. } if protocol == PROTOCOL_VERSION => Ok(Response::Hello {
-                daemon_version: VERSION.to_owned(),
-                protocol: PROTOCOL_VERSION,
-            }),
-            Request::Hello {
-                client_version,
-                protocol,
-            } => Err(version_mismatch(&format!(
-                "client {client_version} speaks protocol {protocol}"
-            ))),
+            // The handshake is handled per connection, in `serve`.
+            Request::Hello { .. } | Request::Prove { .. } => Err(ErrorBody::new(
+                ErrorKind::InvalidRequest,
+                "hello and prove are only valid at the start of a connection",
+            )),
             Request::Shutdown => Ok(Response::ShuttingDown),
             Request::BeginTurn {
                 root,
@@ -491,6 +499,9 @@ fn serve(stream: Stream, shared: &Shared) {
     // Named pipes do not support read timeouts; there, idle connections stay open.
     let _ = stream.set_recv_timeout(Some(shared.idle_connection_after));
     let mut conn = BufReader::new(stream);
+    // The challenge this daemon sent in its hello, and whether the client answered it.
+    let mut challenge: Option<String> = None;
+    let mut authenticated = false;
     loop {
         let line = match read_frame(&mut conn) {
             Ok(Some(line)) => line,
@@ -516,6 +527,53 @@ fn serve(stream: Stream, shared: &Shared) {
             let error = version_mismatch(&format!("the request uses protocol {}", envelope.v));
             let _ = answer(&mut conn, envelope.id, Err(error));
             return;
+        }
+        match &envelope.req {
+            Request::Hello { nonce, .. } => {
+                let server_nonce = match auth::nonce() {
+                    Ok(nonce) => nonce,
+                    Err(e) => {
+                        let error = ErrorBody::new(ErrorKind::Internal, format!("no randomness: {e}"));
+                        let _ = answer(&mut conn, envelope.id, Err(error));
+                        return;
+                    }
+                };
+                let hello = Response::Hello {
+                    daemon_version: VERSION.to_owned(),
+                    protocol: PROTOCOL_VERSION,
+                    nonce: server_nonce.clone(),
+                    proof: shared.secret.server_proof(nonce),
+                };
+                challenge = Some(server_nonce);
+                if answer(&mut conn, envelope.id, Ok(hello)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            Request::Prove { proof } => {
+                let valid = challenge
+                    .as_deref()
+                    .is_some_and(|challenge| shared.secret.verify_client(challenge, proof));
+                if !valid {
+                    let error = ErrorBody::new(ErrorKind::Unauthenticated, "the proof does not match");
+                    let _ = answer(&mut conn, envelope.id, Err(error));
+                    return;
+                }
+                authenticated = true;
+                if answer(&mut conn, envelope.id, Ok(Response::Authenticated)).is_err() {
+                    return;
+                }
+                continue;
+            }
+            _ if !authenticated => {
+                let error = ErrorBody::new(
+                    ErrorKind::Unauthenticated,
+                    "authenticate first: send hello, then prove",
+                );
+                let _ = answer(&mut conn, envelope.id, Err(error));
+                return;
+            }
+            _ => {}
         }
         let shutdown = matches!(envelope.req, Request::Shutdown);
         let in_flight = InFlight::start(shared);

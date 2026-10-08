@@ -58,8 +58,13 @@ fn every_request_has_a_stable_wire_form() {
         Request::Hello {
             client_version: "0.1.0".into(),
             protocol: 1,
+            nonce: "c0ffee".into(),
         },
-        json!({"type": "hello", "client_version": "0.1.0", "protocol": 1}),
+        json!({"type": "hello", "client_version": "0.1.0", "protocol": 1, "nonce": "c0ffee"}),
+    );
+    request(
+        Request::Prove { proof: "ab12".into() },
+        json!({"type": "prove", "proof": "ab12"}),
     );
     request(
         Request::BeginTurn {
@@ -197,9 +202,12 @@ fn every_response_has_a_stable_wire_form() {
         Response::Hello {
             daemon_version: "0.1.0".into(),
             protocol: 1,
+            nonce: "beef".into(),
+            proof: "cd34".into(),
         },
-        json!({"type": "hello", "daemon_version": "0.1.0", "protocol": 1}),
+        json!({"type": "hello", "daemon_version": "0.1.0", "protocol": 1, "nonce": "beef", "proof": "cd34"}),
     );
+    ok(Response::Authenticated, json!({"type": "authenticated"}));
     ok(
         Response::Snapshot { snapshot: snap('b') },
         json!({"type": "snapshot", "snapshot": "b".repeat(64)}),
@@ -307,6 +315,7 @@ fn err(kind: ErrorKind, expected: Value) {
 fn every_error_has_a_stable_wire_form() {
     err(ErrorKind::InvalidRequest, json!({"kind": "invalid_request"}));
     err(ErrorKind::VersionMismatch, json!({"kind": "version_mismatch"}));
+    err(ErrorKind::Unauthenticated, json!({"kind": "unauthenticated"}));
     err(
         ErrorKind::TurnInProgress { session: "s1".into() },
         json!({"kind": "turn_in_progress", "session": "s1"}),

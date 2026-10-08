@@ -7,9 +7,11 @@ use std::time::{Duration, Instant};
 use interprocess::ConnectWaitMode;
 use interprocess::local_socket::{ConnectOptions, Stream};
 
+use crate::auth::{self, Secret};
 use crate::framing::{FrameError, read_frame, write_frame};
 use crate::{
-    ErrorBody, Outcome, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope, endpoint,
+    ErrorBody, ErrorKind, Outcome, PROTOCOL_VERSION, Request, RequestEnvelope, Response, ResponseEnvelope,
+    endpoint,
 };
 
 /// How long [`Client::call`] waits for an answer by default. Generous, because
@@ -28,6 +30,10 @@ pub enum ClientError {
     Io(#[from] io::Error),
     #[error("unexpected message from the Remora daemon: {0}")]
     Protocol(String),
+    /// What answered on the daemon's endpoint could not prove it knows the secret: it is not
+    /// this user's daemon. Nothing but the challenge was sent to it.
+    #[error("something other than your Remora daemon answers on its endpoint")]
+    Impostor,
     /// The daemon answered with an error.
     #[error(transparent)]
     Daemon(ErrorBody),
@@ -60,6 +66,25 @@ impl Client {
 
     /// Like [`connect`](Self::connect), with `timeout` for the `hello` exchange and every later call.
     pub fn connect_with_timeout(data_dir: &Path, timeout: Duration) -> Result<Self, ClientError> {
+        let (client, protocol) = Self::open(data_dir, timeout)?;
+        if protocol != PROTOCOL_VERSION {
+            return Err(ClientError::Daemon(ErrorBody::new(
+                ErrorKind::VersionMismatch,
+                format!(
+                    "the running daemon ({}) speaks protocol {protocol}, this remora ({}) speaks {PROTOCOL_VERSION}: run `remora service install` to replace it",
+                    client.daemon_version,
+                    env!("CARGO_PKG_VERSION")
+                ),
+            )));
+        }
+        Ok(client)
+    }
+
+    /// Connect and authenticate, whatever protocol the daemon speaks. Returns its protocol.
+    fn open(data_dir: &Path, timeout: Duration) -> Result<(Self, u32), ClientError> {
+        // No secret means no daemon has started for this data directory (or this user cannot
+        // read it).
+        let secret = Secret::load(data_dir).map_err(|_| ClientError::DaemonNotRunning)?;
         let stream = connect_stream(data_dir, timeout)?;
         let mut client = Self {
             conn: Some(BufReader::new(stream)),
@@ -67,19 +92,47 @@ impl Client {
             timeout,
             daemon_version: String::new(),
         };
+        let protocol = client.authenticate(&secret)?;
+        Ok((client, protocol))
+    }
+
+    /// The handshake: the daemon proves it knows the secret before anything else is sent,
+    /// then the client proves it does. Returns the daemon's protocol.
+    fn authenticate(&mut self, secret: &Secret) -> Result<u32, ClientError> {
+        let nonce = auth::nonce()?;
         let hello = Request::Hello {
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol: PROTOCOL_VERSION,
+            nonce: nonce.clone(),
         };
-        match client.call(hello)? {
-            Response::Hello { daemon_version, .. } => client.daemon_version = daemon_version,
+        let (protocol, server_nonce) = match self.call(hello)? {
+            Response::Hello {
+                daemon_version,
+                protocol,
+                nonce: server_nonce,
+                proof,
+            } => {
+                if !secret.verify_server(&nonce, &proof) {
+                    self.conn = None;
+                    return Err(ClientError::Impostor);
+                }
+                self.daemon_version = daemon_version;
+                (protocol, server_nonce)
+            }
             other => {
                 return Err(ClientError::Protocol(format!(
                     "unexpected answer to hello: {other:?}"
                 )));
             }
+        };
+        match self.call(Request::Prove {
+            proof: secret.client_proof(&server_nonce),
+        })? {
+            Response::Authenticated => Ok(protocol),
+            other => Err(ClientError::Protocol(format!(
+                "unexpected answer to prove: {other:?}"
+            ))),
         }
-        Ok(client)
     }
 
     /// How long each [`call`](Self::call) waits for its answer.
@@ -163,22 +216,18 @@ fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientEr
 /// (`remorad.lock`) released, so a replacement can start at once. `Ok(false)` if no daemon
 /// was running.
 ///
-/// No `hello` is exchanged: an older or newer daemon would refuse it. The daemon stops even
-/// though its answer is not read.
+/// The handshake does not depend on the protocol version, so this stops an older or newer
+/// daemon too.
 pub fn stop_daemon(data_dir: &Path, timeout: Duration) -> Result<bool, ClientError> {
     let deadline = Instant::now() + timeout;
-    let mut stream = match connect_stream(data_dir, timeout) {
-        Ok(stream) => stream,
+    let mut client = match Client::open(data_dir, timeout) {
+        Ok((client, _protocol)) => client,
         Err(ClientError::DaemonNotRunning) => return Ok(false),
         Err(e) => return Err(e),
     };
-    let shutdown = RequestEnvelope {
-        v: PROTOCOL_VERSION,
-        id: 0,
-        req: Request::Shutdown,
-    };
-    write_frame(&mut stream, &shutdown)?;
-    drop(stream);
+    // The daemon stops once it has read the request, whether or not the answer arrives.
+    let _ = client.call(Request::Shutdown);
+    drop(client);
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let gone = matches!(

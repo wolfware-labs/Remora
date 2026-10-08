@@ -200,6 +200,10 @@ fn describe(error: &ClientError) -> (&'static str, String) {
         ),
         ClientError::Daemon(body) => ("daemon-error", body.message.clone()),
         ClientError::Protocol(detail) => ("protocol", detail.clone()),
+        ClientError::Impostor => (
+            "impostor",
+            "something other than your Remora daemon answers on its endpoint".to_owned(),
+        ),
     }
 }
 

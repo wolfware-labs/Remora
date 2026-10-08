@@ -88,7 +88,7 @@ fn a_request_with_another_envelope_version_is_refused() {
 #[test]
 fn a_relative_project_folder_is_refused() {
     let d = TestDaemon::start();
-    let mut conn = d.raw();
+    let mut conn = d.authenticated();
 
     let response = send(
         &mut conn,
@@ -102,7 +102,7 @@ fn a_relative_project_folder_is_refused() {
 #[test]
 fn a_shutdown_whose_answer_cannot_be_delivered_still_stops_the_daemon() {
     let d = TestDaemon::start();
-    let mut conn = d.raw();
+    let mut conn = d.authenticated();
     conn.get_mut()
         .write_all(b"{\"v\":1,\"id\":1,\"req\":{\"type\":\"shutdown\"}}\n")
         .unwrap();
@@ -113,4 +113,55 @@ fn a_shutdown_whose_answer_cannot_be_delivered_still_stops_the_daemon() {
         assert!(std::time::Instant::now() < deadline, "the daemon kept running");
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
+}
+
+#[test]
+fn a_request_before_authenticating_is_refused_and_the_connection_closed() {
+    let d = TestDaemon::start();
+    let mut conn = d.raw();
+
+    let response = send(&mut conn, b"{\"v\":1,\"id\":3,\"req\":{\"type\":\"shutdown\"}}\n").unwrap();
+
+    assert_eq!(
+        (response.id, error_kind(&response)),
+        (3, &ErrorKind::Unauthenticated)
+    );
+    assert!(send(&mut conn, b"{}\n").is_none(), "closed");
+    assert!(
+        remora_ipc::Client::connect(d.data.path()).is_ok(),
+        "and the daemon kept running"
+    );
+}
+
+#[test]
+fn a_client_that_does_not_know_the_secret_is_refused() {
+    let d = TestDaemon::start();
+    let mut conn = d.raw();
+    let wrong = remora_ipc::auth::Secret::generate().unwrap();
+
+    assert!(!common::handshake(&mut conn, &wrong));
+    assert!(send(&mut conn, b"{}\n").is_none(), "closed");
+}
+
+#[test]
+fn every_start_writes_a_new_secret_and_the_old_one_stops_working() {
+    let d = TestDaemon::start();
+    let old = remora_ipc::auth::Secret::load(d.data.path()).unwrap();
+    d.stop();
+
+    let again = remora_daemon::Daemon::start(common::config(d.data.path(), &d.clock)).unwrap();
+    let new = remora_ipc::auth::Secret::load(d.data.path()).unwrap();
+    let endpoint = remora_ipc::endpoint(again.data_dir());
+    let mut conn = std::io::BufReader::new(
+        <interprocess::local_socket::Stream as interprocess::local_socket::traits::Stream>::connect(
+            endpoint.name().unwrap(),
+        )
+        .unwrap(),
+    );
+    let accepted = common::handshake(&mut conn, &old);
+    again.shutdown();
+    again.wait();
+
+    assert_ne!(old, new);
+    assert!(!accepted);
 }

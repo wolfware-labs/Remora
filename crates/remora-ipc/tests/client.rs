@@ -50,6 +50,10 @@ fn endpoints_differ_per_data_dir() {
 #[test]
 fn a_daemon_that_never_answers_times_out_while_connecting() {
     let data = tempfile::TempDir::new().unwrap();
+    remora_ipc::auth::Secret::generate()
+        .unwrap()
+        .store(data.path())
+        .unwrap();
     let Endpoint::Socket(path) = endpoint(&data.path().canonicalize().unwrap()) else {
         panic!("Unix endpoints are socket files");
     };

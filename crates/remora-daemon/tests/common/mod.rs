@@ -11,7 +11,10 @@ use interprocess::local_socket::Stream;
 use interprocess::local_socket::traits::Stream as _;
 use remora_daemon::{Daemon, DaemonConfig, DaemonHandle, ManualClock};
 use remora_engine::RestorePoint;
-use remora_ipc::{Client, Request, Response, endpoint};
+use remora_ipc::auth::{self, Secret};
+use remora_ipc::{
+    Client, Outcome, Request, RequestEnvelope, Response, ResponseEnvelope, endpoint, read_frame, write_frame,
+};
 use tempfile::TempDir;
 
 pub const START_MS: i64 = 1_700_000_000_000;
@@ -48,6 +51,14 @@ impl TestDaemon {
     pub fn raw(&self) -> BufReader<Stream> {
         let endpoint = endpoint(self.daemon.data_dir());
         BufReader::new(Stream::connect(endpoint.name().unwrap()).unwrap())
+    }
+
+    /// A raw connection that has completed the handshake with the daemon's secret.
+    pub fn authenticated(&self) -> BufReader<Stream> {
+        let mut conn = self.raw();
+        let secret = Secret::load(self.data.path()).unwrap();
+        assert!(handshake(&mut conn, &secret), "the daemon refused its own secret");
+        conn
     }
 
     pub fn write(&self, rel: &str, contents: &str) {
@@ -131,4 +142,40 @@ pub fn config(data_dir: &Path, clock: &ManualClock) -> DaemonConfig {
         sweep_every: Duration::from_secs(3_600),
         ..DaemonConfig::new(data_dir)
     }
+}
+
+/// Send `request` on a raw connection and read the answer (`None` once the daemon closed it).
+pub fn exchange(conn: &mut BufReader<Stream>, id: u64, req: Request) -> Option<ResponseEnvelope> {
+    write_frame(conn.get_mut(), &RequestEnvelope { v: 1, id, req }).ok()?;
+    let line = read_frame(conn).ok()??;
+    Some(serde_json::from_str(&line).unwrap())
+}
+
+/// Run the handshake on a raw connection with `secret`; true if the daemon accepted it.
+pub fn handshake(conn: &mut BufReader<Stream>, secret: &Secret) -> bool {
+    let nonce = auth::nonce().unwrap();
+    let hello = Request::Hello {
+        client_version: "test".into(),
+        protocol: 1,
+        nonce: nonce.clone(),
+    };
+    let Some(ResponseEnvelope {
+        outcome: Outcome::Ok(Response::Hello {
+            nonce: server_nonce, ..
+        }),
+        ..
+    }) = exchange(conn, 1, hello)
+    else {
+        return false;
+    };
+    let prove = Request::Prove {
+        proof: secret.client_proof(&server_nonce),
+    };
+    matches!(
+        exchange(conn, 2, prove),
+        Some(ResponseEnvelope {
+            outcome: Outcome::Ok(Response::Authenticated),
+            ..
+        })
+    )
 }

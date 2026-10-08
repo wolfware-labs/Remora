@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use common::{START_MS, TestDaemon, config};
 use remora_daemon::{Daemon, DaemonError};
-use remora_ipc::{Client, ClientError, ErrorKind, Request, Response};
+use remora_ipc::{Client, ClientError, Request, Response};
 
 #[test]
 fn a_turn_idle_for_over_6_hours_is_closed_as_interrupted() {
@@ -63,23 +63,6 @@ fn event_times_never_go_backwards() {
     assert_eq!(times.len(), 3);
     assert!(times[0] >= START_MS);
     assert!(times.windows(2).all(|w| w[0] < w[1]), "{times:?}");
-}
-
-#[test]
-fn a_client_with_another_protocol_version_is_told_what_to_do() {
-    let d = TestDaemon::start();
-    let mut client = d.client();
-
-    let refused = client.call(Request::Hello {
-        client_version: "9.0.0".into(),
-        protocol: 2,
-    });
-
-    let Err(ClientError::Daemon(error)) = refused else {
-        panic!("expected version_mismatch, got {refused:?}");
-    };
-    assert_eq!(error.kind, ErrorKind::VersionMismatch);
-    assert!(error.message.contains("remorad install"), "{}", error.message);
 }
 
 #[test]
@@ -168,7 +151,7 @@ fn shutdown_lets_the_running_request_finish() {
 }
 
 #[test]
-fn stop_daemon_stops_a_daemon_without_a_hello() {
+fn stop_daemon_stops_the_daemon_through_the_handshake() {
     let d = TestDaemon::start();
     // As in `remorad run`, a thread waits on the daemon: that is what releases its lock.
     let daemon = d.daemon.clone();

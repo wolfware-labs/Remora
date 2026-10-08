@@ -41,3 +41,12 @@ fn a_stale_socket_file_from_a_crashed_daemon_is_replaced() {
 
     assert!(connected.is_ok());
 }
+
+#[test]
+fn the_secret_file_is_owner_only() {
+    let d = TestDaemon::start();
+
+    let meta = std::fs::metadata(d.data.path().join(remora_ipc::auth::SECRET_FILE)).unwrap();
+
+    assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+}

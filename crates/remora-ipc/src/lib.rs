@@ -12,6 +12,7 @@
 //! The daemon listens on a socket file inside the data directory (macOS, Linux) or on a
 //! named pipe derived from it (Windows): see [`endpoint`].
 
+pub mod auth;
 mod client;
 mod endpoint;
 mod framing;
