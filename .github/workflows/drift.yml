@@ -18,11 +18,11 @@ jobs:
     name: claude code
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    env:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
     steps:
       - name: Check for the API key
         id: key
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
         run: |
           if [ -z "$ANTHROPIC_API_KEY" ]; then
             echo "skipped: no ANTHROPIC_API_KEY secret"
@@ -44,5 +44,6 @@ jobs:
       - name: Real Claude Code session
         if: steps.key.outputs.present == 'true'
         env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           REMORA_TEST_CLAUDE: "1"
         run: cargo test -p remora-cli --test claude_code --locked -- --nocapture

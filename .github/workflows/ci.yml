@@ -3,7 +3,8 @@ name: ci
 on:
   pull_request:
   push:
-    branches: [main, plan-3a]
+    # `plan-*` work branches run the macOS and Windows jobs before a plan is merged.
+    branches: [main, 'plan-*']
 
 permissions:
   contents: read

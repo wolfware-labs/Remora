@@ -138,9 +138,9 @@ pub enum Request {
     Verify {
         root: PathBuf,
     },
-    /// Stop the daemon after the requests already running finish. Every daemon version
-    /// understands `{"v":1,"id":0,"req":{"type":"shutdown"}}`, so an upgrade can always stop
-    /// the daemon it replaces.
+    /// Stop the daemon after the requests already running finish. Like every request, a
+    /// shutdown is accepted only after the handshake (hello, then prove);
+    /// [`crate::stop_daemon`] performs it.
     Shutdown,
 }
 

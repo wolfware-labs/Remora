@@ -211,13 +211,13 @@ fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientEr
         })
 }
 
-/// Stop the daemon that owns `data_dir`, whatever protocol version it speaks, and wait up
+/// Stop the daemon that owns `data_dir` and wait up
 /// to `timeout` until it has stopped: its endpoint gone and its instance lock
 /// (`remorad.lock`) released, so a replacement can start at once. `Ok(false)` if no daemon
 /// was running.
 ///
-/// The handshake does not depend on the protocol version, so this stops an older or newer
-/// daemon too.
+/// A daemon from before authentication (no `remorad.secret` in the data directory) is not
+/// stopped and is reported as `Ok(false)`.
 pub fn stop_daemon(data_dir: &Path, timeout: Duration) -> Result<bool, ClientError> {
     let deadline = Instant::now() + timeout;
     let mut client = match Client::open(data_dir, timeout) {

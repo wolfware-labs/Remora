@@ -10,7 +10,9 @@
 //! ```
 //!
 //! The daemon listens on a socket file inside the data directory (macOS, Linux) or on a
-//! named pipe derived from it (Windows): see [`endpoint`].
+//! named pipe derived from it (Windows): see [`endpoint`]. A socket whose path would exceed
+//! [`MAX_SOCKET_PATH`] lives in the owner-only runtime folder instead. Every connection
+//! starts with the mutual handshake of the [`auth`] module.
 
 pub mod auth;
 mod client;

@@ -27,7 +27,7 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             let at = open.at_ms();
             open.project
                 .before_command(&session, &command, tool_use_id.as_deref(), at)
-                .and_then(|snapshot| {
+                .map(|snapshot| {
                     // The agent stopped waiting before the checkpoint was ready: the command
                     // may already have started.
                     if deadline_ms.is_some_and(|deadline| open.now_ms() > deadline) {
@@ -35,9 +35,11 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
                             "session {}: a checkpoint finished after the agent's deadline, marked late",
                             session.id
                         );
-                        open.project.mark_late(&session, tool_use_id.as_deref())?;
+                        if let Err(e) = open.project.mark_late(&session, tool_use_id.as_deref()) {
+                            log::warn!("session {}: could not mark the checkpoint late: {e}", session.id);
+                        }
                     }
-                    Ok(Response::Snapshot { snapshot })
+                    Response::Snapshot { snapshot }
                 })
         }
         Job::AfterCommand {

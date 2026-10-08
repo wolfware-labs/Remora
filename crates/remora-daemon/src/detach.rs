@@ -66,9 +66,18 @@ fn start_process_script(exe: &str, args: &[&str], cwd: &str) -> String {
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
-/// A PowerShell single-quoted string: nothing inside is expanded.
+/// A PowerShell single-quoted string: nothing inside is expanded. PowerShell also reads the
+/// curly single quotes as quotes, so each of them is doubled too.
 fn ps_literal(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "''"))
+    let mut out = String::from("'");
+    for c in s.chars() {
+        out.push(c);
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201A}' | '\u{201B}') {
+            out.push(c);
+        }
+    }
+    out.push('\'');
+    out
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -128,5 +137,10 @@ mod tests {
         );
         let spaced = start_process_script(r"C:\Program Files\remorad.exe", &["run", r"C:\a b\"], r"C:\");
         assert!(spaced.contains(r#"-ArgumentList 'run "C:\a b\\"'"#), "{spaced}");
+    }
+
+    #[test]
+    fn curly_single_quotes_are_doubled_for_powershell() {
+        assert_eq!(ps_literal("C:\\o\u{2019}neil"), "'C:\\o\u{2019}\u{2019}neil'");
     }
 }

@@ -245,6 +245,9 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         return Err(ClientError::DaemonNotRunning);
     };
     for _ in 0..2 {
+        if Instant::now() >= deadline {
+            break;
+        }
         start_daemon(remora, &env.data_dir)?;
         let started_by = (Instant::now() + env.start_wait).min(deadline);
         loop {
