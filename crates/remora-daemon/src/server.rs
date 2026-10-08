@@ -96,6 +96,7 @@ impl Daemon {
             stopping: Mutex::new(false),
             wake: Condvar::new(),
             threads: Mutex::new(Vec::new()),
+            waker: Mutex::new(None),
             instance: Mutex::new(Some(instance)),
             in_flight: Mutex::new(0),
             answered: Condvar::new(),
@@ -150,10 +151,13 @@ impl DaemonHandle {
     }
 
     /// Block until the daemon has shut down: no listener, no workers, lock released.
+    /// Idle connections are not waited for; on Windows each keeps its pipe instance (and so
+    /// the pipe name) until the client closes it or this process exits.
     pub fn wait(&self) {
         for thread in std::mem::take(&mut *lock(&self.shared.threads)) {
             let _ = thread.join();
         }
+        drop(lock(&self.shared.waker).take());
         // Without handles no new jobs arrive; each worker finishes the jobs it has, then stops.
         drop(lock(&self.shared.workers).take());
         for thread in std::mem::take(&mut *lock(&self.shared.worker_threads)) {
@@ -193,6 +197,8 @@ struct Shared {
     wake: Condvar,
     /// The accept loop and the janitor.
     threads: Mutex<Vec<JoinHandle<()>>>,
+    /// The connection that woke the accept loop at shutdown, open until the loop has ended.
+    waker: Mutex<Option<Stream>>,
     instance: Mutex<Option<File>>,
     /// Requests read but not yet answered; `wait` returns only once this is zero.
     in_flight: Mutex<usize>,
@@ -214,9 +220,13 @@ impl Shared {
         }
         self.wake.notify_all();
         log::info!("remorad shutting down");
-        // Unblock the accept loop, which then sees `stopping`.
-        if let Ok(name) = self.endpoint.name() {
-            let _ = Stream::connect(name);
+        // Unblock the accept loop, which then sees `stopping`. The connection stays open until
+        // `wait` has joined that loop: a Windows pipe listener skips clients that are already
+        // gone and would keep waiting.
+        if let Ok(name) = self.endpoint.name()
+            && let Ok(stream) = Stream::connect(name)
+        {
+            *lock(&self.waker) = Some(stream);
         }
     }
 

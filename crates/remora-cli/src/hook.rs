@@ -6,7 +6,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
@@ -240,34 +239,14 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
 
 /// Start `remora daemon` for `data_dir`, detached so it outlives this hook.
 fn start_daemon(remora: &Path, data_dir: &Path) -> Result<(), ClientError> {
-    let mut command = Command::new(remora);
-    command
-        .arg("--data-dir")
-        .arg(data_dir)
-        .arg("daemon")
-        // Not the agent's folder, which the agent may delete.
-        .current_dir(if data_dir.is_dir() {
-            data_dir.to_path_buf()
-        } else {
-            std::env::temp_dir()
-        })
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // Its own process group: Claude Code ending this hook must not stop the daemon.
-        command.process_group(0);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-        command.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
-    }
-    command.spawn().map(drop).map_err(ClientError::Io)
+    // Not the agent's folder, which the agent may delete.
+    let cwd = if data_dir.is_dir() {
+        data_dir.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    let data_dir = data_dir.to_string_lossy();
+    remora_daemon::spawn_detached(remora, &["--data-dir", &data_dir, "daemon"], &cwd).map_err(ClientError::Io)
 }
 
 /// Small files under the data directory, one per session (and reason).

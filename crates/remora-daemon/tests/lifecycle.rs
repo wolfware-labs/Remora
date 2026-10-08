@@ -100,15 +100,20 @@ fn a_stopped_daemon_releases_its_data_dir() {
     let d = TestDaemon::start();
     let idle = d.client(); // an idle connection must not keep the daemon alive
     d.stop();
+    // A Windows pipe lasts while a connection to it is open (`remorad` exiting closes them all).
+    drop(idle);
 
-    assert!(matches!(
-        Client::connect(d.data.path()),
-        Err(ClientError::DaemonNotRunning)
-    ));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        match Client::connect_with_timeout(d.data.path(), Duration::from_millis(500)) {
+            Err(ClientError::DaemonNotRunning) => break,
+            other => assert!(std::time::Instant::now() < deadline, "still answering: {other:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let again = Daemon::start(config(d.data.path(), &d.clock)).unwrap();
     again.shutdown();
     again.wait();
-    drop(idle);
 }
 
 #[test]

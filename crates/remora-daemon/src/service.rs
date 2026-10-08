@@ -298,22 +298,10 @@ mod platform {
 
     /// Start `exe run` with no console window, outliving this process.
     fn start_detached(exe: &Path) -> Result<(), ServiceError> {
-        use std::os::windows::process::CommandExt;
-        use std::process::Stdio;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        Command::new(exe)
-            .arg("run")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .creation_flags(DETACHED_PROCESS | CREATE_NO_WINDOW)
-            .spawn()
-            .map(drop)
-            .map_err(|source| ServiceError::Io {
-                path: exe.to_path_buf(),
-                source,
-            })
+        crate::spawn_detached(exe, &["run"], &std::env::temp_dir()).map_err(|source| ServiceError::Io {
+            path: exe.to_path_buf(),
+            source,
+        })
     }
 }
 
