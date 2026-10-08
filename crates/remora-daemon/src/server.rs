@@ -557,6 +557,7 @@ fn serve(stream: Stream, shared: &Shared) {
                 if !valid {
                     let error = ErrorBody::new(ErrorKind::Unauthenticated, "the proof does not match");
                     let _ = answer(&mut conn, envelope.id, Err(error));
+                    log::warn!("refused a connection: the proof does not match");
                     return;
                 }
                 authenticated = true;
@@ -571,6 +572,7 @@ fn serve(stream: Stream, shared: &Shared) {
                     "authenticate first: send hello, then prove",
                 );
                 let _ = answer(&mut conn, envelope.id, Err(error));
+                log::warn!("refused a connection: a request before authenticating");
                 return;
             }
             _ => {}
