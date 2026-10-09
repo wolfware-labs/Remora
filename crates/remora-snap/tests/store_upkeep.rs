@@ -109,3 +109,38 @@ fn opening_a_store_tightens_loose_directory_permissions() {
         );
     }
 }
+
+#[test]
+fn opening_a_store_removes_temp_files_a_crash_left_but_not_fresh_ones() {
+    let fx = Fixture::new();
+    fx.snapshotter();
+    let tmp = fx.store.path().join("blobs").join("tmp");
+    let old = tmp.join(".blob.1.1.remora-tmp");
+    let fresh = tmp.join(".blob.1.2.remora-tmp");
+    fs::write(&old, "half a file").unwrap();
+    fs::write(&fresh, "being stored right now").unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 60 * 60);
+    fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    fx.snapshotter();
+
+    assert!(!old.exists(), "a leftover from a crash is removed");
+    assert!(fresh.exists(), "another snapshotter may still be storing it");
+}
+
+#[test]
+fn a_snapshot_leaves_no_temp_files_behind() {
+    let fx = Fixture::new();
+    fx.write("a.txt", "a");
+    fx.write("b.txt", "a"); // the same contents: stored once, the second copy discarded
+
+    fx.snapshotter().snapshot(fx.root()).unwrap();
+
+    let tmp = fx.store.path().join("blobs").join("tmp");
+    assert_eq!(fs::read_dir(tmp).unwrap().count(), 0);
+}

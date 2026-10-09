@@ -1,16 +1,21 @@
-//! Plain-copy backend: a content-addressed blob store plus JSON manifests.
+//! The snapshot store: a content-addressed blob store plus JSON manifests.
 //!
 //! Store layout:
 //! ```text
 //! <store>/blobs/<first 2 hex>/<remaining 62 hex>   file contents, deduplicated by SHA-256
+//! <store>/blobs/tmp/                               files being stored (leftovers removed when opened)
 //! <store>/manifests/<snapshot id>.json             one manifest per snapshot
 //! <store>/statcache.json                           metadata → hash cache (see `statcache`)
 //! ```
+//!
+//! Files go into and come out of the blob store by cloning (copy-on-write: APFS, btrfs,
+//! XFS, ReFS) where the filesystem can, else by copying, one file at a time.
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use sha2::{Digest, Sha256};
 
@@ -42,6 +47,9 @@ impl CopySnapshotter {
             platform::tighten_dir(&dir).map_err(io_at(&dir))?;
         }
         let store = store.canonicalize().map_err(io_at(&store))?;
+        let tmp = store.join("blobs").join("tmp");
+        platform::create_private_dir_all(&tmp).map_err(io_at(&tmp))?;
+        remove_stale_temps(&tmp, STALE_TEMP);
         Ok(Self { store, opts })
     }
 
@@ -57,37 +65,90 @@ impl CopySnapshotter {
         self.store.join("statcache.json")
     }
 
-    fn put_blob(&self, bytes: &[u8]) -> Result<String, SnapError> {
-        let hash = hash_bytes(bytes);
-        let path = self.blob_path(&hash);
-        // A blob whose size is wrong (say, truncated by a crash) is rewritten.
-        let intact = fs::metadata(&path).is_ok_and(|m| m.len() == bytes.len() as u64);
-        if !intact {
-            let dir = path.parent().expect("blob path has a parent");
-            platform::create_private_dir_all(dir).map_err(io_at(dir))?;
-            write_atomic(&path, bytes).map_err(io_at(&path))?;
+    /// Store the file at `abs` as a blob: clone it (or copy it) into `blobs/tmp`, hash that
+    /// copy, which cannot change under us, and move it to its place.
+    fn store_file(&self, abs: &Path) -> Result<Stored, StoreError> {
+        // An unreadable or vanished file is the project's problem, not the store's.
+        File::open(abs).map_err(StoreError::Source)?;
+        let tmp = self.store.join("blobs").join("tmp").join(temp_name("blob"));
+        let result = (|| {
+            let (tmp, cloned) = clone_or_copy(abs, &tmp).map_err(|e| {
+                if fs::metadata(abs).is_err() {
+                    StoreError::Source(e)
+                } else {
+                    StoreError::Store(io_at(&tmp)(e))
+                }
+            })?;
+            platform::set_private(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
+            let (hash, size) = hash_and_size(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
+            let path = self.blob_path(&hash);
+            // A blob whose size is wrong (say, truncated by a crash) is replaced.
+            if fs::metadata(&path).is_ok_and(|m| m.len() == size) {
+                let _ = fs::remove_file(&tmp);
+            } else {
+                let dir = path.parent().expect("blob path has a parent");
+                platform::create_private_dir_all(dir).map_err(|e| StoreError::Store(io_at(dir)(e)))?;
+                fs::rename(&tmp, &path).map_err(|e| StoreError::Store(io_at(&path)(e)))?;
+            }
+            Ok(Stored { hash, size, cloned })
+        })();
+        if result.is_err() {
+            remove_temps(&tmp);
         }
-        Ok(hash)
+        result
     }
 
-    /// Returns `Ok(true)` if the file was (re)written, `Ok(false)` if it already matched.
-    fn restore_file(&self, abs: &Path, hash: &str, mode: u32) -> io::Result<bool> {
+    /// Make `abs` hold blob `hash` with `mode`, unless it already does.
+    fn restore_file(&self, abs: &Path, hash: &str, mode: u32) -> io::Result<Restored> {
         let unchanged =
             fs::symlink_metadata(abs).is_ok_and(|m| m.is_file()) && hash_file(abs).is_ok_and(|h| h == hash);
-        if !unchanged {
-            let bytes = fs::read(self.blob_path(hash))
+        if unchanged {
+            platform::set_mode(abs, mode)?;
+            return Ok(Restored::Unchanged);
+        }
+        let blob = self.blob_path(hash);
+        let tmp = abs.with_file_name(temp_name(
+            abs.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+        ));
+        let result = (|| {
+            let (tmp, cloned) = clone_or_copy(&blob, &tmp)
                 .map_err(|e| io::Error::new(e.kind(), format!("reading blob {hash}: {e}")))?;
-            if hash_bytes(&bytes) != hash {
+            if hash_file(&tmp)? != hash {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("blob {hash} is corrupt (its contents do not match its hash)"),
                 ));
             }
-            write_atomic(abs, &bytes)?;
+            platform::set_mode(&tmp, mode)?;
+            fs::rename(&tmp, abs)?;
+            Ok(Restored::Written { cloned })
+        })();
+        if result.is_err() {
+            remove_temps(&tmp);
         }
-        platform::set_mode(abs, mode)?;
-        Ok(!unchanged)
+        result
     }
+}
+
+/// A file put into the blob store.
+struct Stored {
+    hash: String,
+    size: u64,
+    cloned: bool,
+}
+
+/// Why a file could not be stored.
+enum StoreError {
+    /// Reading the project's file failed: the file is left unprotected.
+    Source(io::Error),
+    /// Writing the store failed: the snapshot fails.
+    Store(SnapError),
+}
+
+/// What restoring one file did.
+enum Restored {
+    Unchanged,
+    Written { cloned: bool },
 }
 
 impl Snapshotter for CopySnapshotter {
@@ -113,6 +174,7 @@ impl Snapshotter for CopySnapshotter {
             std::path::MAIN_SEPARATOR
         ));
         let mut hashed_files = 0;
+        let mut cloned_files = 0;
 
         for (rel, entry) in scanned.entries {
             let node = match entry.kind {
@@ -215,14 +277,18 @@ impl Snapshotter for CopySnapshotter {
                             stored: true,
                         }
                     } else {
-                        match fs::read(&entry.abs) {
-                            Ok(bytes) => {
+                        match self.store_file(&entry.abs) {
+                            Ok(Stored {
+                                hash,
+                                size: stored_size,
+                                cloned,
+                            }) => {
                                 hashed_files += 1;
-                                let hash = self.put_blob(&bytes)?;
-                                // Only cache what was read if the file did not change since the scan, and
-                                // never while it is racy (see `statcache`).
+                                cloned_files += usize::from(cloned);
+                                // Only cache what was stored if the file did not change since the scan,
+                                // and never while it is racy (see `statcache`).
                                 if let Some(mtime_ns) = mtime_ns
-                                    && bytes.len() as u64 == size
+                                    && stored_size == size
                                     && !is_racy(mtime_ns, started_ns)
                                 {
                                     cache.insert(
@@ -238,13 +304,14 @@ impl Snapshotter for CopySnapshotter {
                                 }
                                 Node::File {
                                     hash,
-                                    size: bytes.len() as u64,
+                                    size: stored_size,
                                     mode,
                                     stored: true,
                                 }
                             }
-                            Err(e) if e.kind() == io::ErrorKind::NotFound => continue,
-                            Err(_) => {
+                            Err(StoreError::Store(e)) => return Err(e),
+                            Err(StoreError::Source(e)) if e.kind() == io::ErrorKind::NotFound => continue,
+                            Err(StoreError::Source(_)) => {
                                 unprotected.push(entry.abs);
                                 Node::Opaque
                             }
@@ -268,7 +335,7 @@ impl Snapshotter for CopySnapshotter {
             id,
             unprotected,
             hashed_files,
-            cloned_files: 0,
+            cloned_files,
         })
     }
 
@@ -373,14 +440,23 @@ impl Snapshotter for CopySnapshotter {
                 continue;
             }
             let result = match node {
-                Node::Dir { .. } => fs::create_dir_all(&abs).map(|()| false),
+                Node::Dir { .. } => fs::create_dir_all(&abs).map(|()| Restored::Unchanged),
                 Node::File { hash, mode, .. } => self.restore_file(&abs, hash, *mode),
-                Node::Symlink { target } => restore_symlink(&abs, target),
-                Node::Opaque => Ok(false),
+                Node::Symlink { target } => restore_symlink(&abs, target).map(|written| {
+                    if written {
+                        Restored::Written { cloned: false }
+                    } else {
+                        Restored::Unchanged
+                    }
+                }),
+                Node::Opaque => Ok(Restored::Unchanged),
             };
             match result {
-                Ok(true) => report.written += 1,
-                Ok(false) => {}
+                Ok(Restored::Written { cloned }) => {
+                    report.written += 1;
+                    report.cloned += usize::from(cloned);
+                }
+                Ok(Restored::Unchanged) => {}
                 Err(e) => report.failed.push((rel.clone(), e.to_string())),
             }
         }
@@ -491,9 +567,9 @@ static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// path makes the write fail instead of being followed. The data is synced before the
 /// rename, so a crash cannot leave a truncated file under the final name.
 fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
-    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = path.with_file_name(format!(".{name}.{}.{n}.remora-tmp", std::process::id()));
+    let tmp = path.with_file_name(temp_name(
+        path.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
+    ));
     let result = (|| {
         let mut file = platform::create_private_file(&tmp)?;
         file.write_all(bytes)?;
@@ -507,22 +583,97 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
     result
 }
 
-fn hash_bytes(bytes: &[u8]) -> String {
-    hex::encode(Sha256::digest(bytes))
+/// How old a file in `blobs/tmp` must be to count as left behind by a crash. Another
+/// snapshotter may be storing into the same store right now; none takes this long per file.
+const STALE_TEMP: Duration = Duration::from_secs(60 * 60);
+
+/// Remove the files in `dir` last modified more than `age` ago. Best effort: a store that
+/// keeps some leftovers still works.
+fn remove_stale_temps(dir: &Path, age: Duration) {
+    let Ok(entries) = fs::read_dir(dir) else { return };
+    for entry in entries.flatten() {
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .is_ok_and(|modified| modified.elapsed().is_ok_and(|elapsed| elapsed > age));
+        if stale {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
-fn hash_file(path: &Path) -> io::Result<String> {
+/// A temp file name for `name`, unique per process and call.
+fn temp_name(name: &str) -> String {
+    let n = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!(".{name}.{}.{n}.remora-tmp", std::process::id())
+}
+
+/// Clone `from` to the new file `to` (copy-on-write) where the filesystem can, else copy it
+/// to `to` with `.copy` appended: Windows may still hold the file of a failed clone, pending
+/// deletion, under the first name. Returns the file written and whether it was cloned. Like
+/// every temp file here, both names are created exclusively, so a planted symlink makes this
+/// fail instead of being followed.
+fn clone_or_copy(from: &Path, to: &Path) -> io::Result<(PathBuf, bool)> {
+    match reflink_copy::reflink(from, to) {
+        Ok(()) => {
+            // Flushing needs a handle with write access on Windows. A clone of a read-only
+            // file is read-only too; its data is checked by hash when used, so skip it then.
+            if let Ok(file) = fs::OpenOptions::new().write(true).open(to) {
+                file.sync_all()?;
+            }
+            Ok((to.to_path_buf(), true))
+        }
+        // Not ours to remove, and copying would fail the same way.
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(_) => {
+            // No clones here (another filesystem, or one without them): copy instead.
+            let _ = fs::remove_file(to);
+            let copy = copy_name(to);
+            let mut source = File::open(from)?;
+            let mut target = platform::create_private_file(&copy)?;
+            io::copy(&mut source, &mut target)?;
+            target.sync_all()?;
+            Ok((copy, false))
+        }
+    }
+}
+
+/// Where `clone_or_copy` copies when it cannot clone to `to`.
+fn copy_name(to: &Path) -> PathBuf {
+    let mut name = to.as_os_str().to_owned();
+    name.push(".copy");
+    PathBuf::from(name)
+}
+
+/// Remove whatever `clone_or_copy(_, tmp)` may have left.
+fn remove_temps(tmp: &Path) {
+    let _ = fs::remove_file(tmp);
+    let _ = fs::remove_file(copy_name(tmp));
+}
+
+/// The SHA-256 of a file and how many bytes it has.
+fn hash_and_size(path: &Path) -> io::Result<(String, u64)> {
     let mut file = File::open(path)?;
     let mut hasher = Sha256::new();
     let mut buf = vec![0u8; 64 * 1024];
+    let mut size = 0u64;
     loop {
         let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }
         hasher.update(&buf[..n]);
+        size += n as u64;
     }
-    Ok(hex::encode(hasher.finalize()))
+    Ok((hex::encode(hasher.finalize()), size))
+}
+
+fn hash_bytes(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn hash_file(path: &Path) -> io::Result<String> {
+    hash_and_size(path).map(|(hash, _)| hash)
 }
 
 #[cfg(all(test, unix))]

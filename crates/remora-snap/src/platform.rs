@@ -79,6 +79,18 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
+/// Make an existing file owner-only (0600) on Unix; a clone keeps its source's mode.
+#[cfg(unix)]
+pub(crate) fn set_private(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+pub(crate) fn set_private(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
 /// Modification time in nanoseconds since the Unix epoch, if the platform reports one.
 pub(crate) fn mtime_ns(meta: &Metadata) -> Option<u64> {
     let since_epoch = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;

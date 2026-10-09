@@ -43,7 +43,7 @@ jobs:
             expect_clones: "0"
           - os: macos
             runner: macos-latest
-            expect_clones: "0"
+            expect_clones: "1"
           - os: windows
             runner: windows-latest
             expect_clones: "0"
@@ -77,9 +77,9 @@ jobs:
         fs: [btrfs, xfs, ext4]
         include:
           - fs: btrfs
-            expect_clones: "0"
+            expect_clones: "1"
           - fs: xfs
-            expect_clones: "0"
+            expect_clones: "1"
           - fs: ext4
             expect_clones: "0"
     runs-on: ubuntu-latest
@@ -144,7 +144,7 @@ jobs:
         run: cargo test -p remora-snap -p remora-engine --locked --no-fail-fast
         env:
           REMORA_TEST_FS: 'R:\remora-fs'
-          REMORA_EXPECT_CLONES: "0"
+          REMORA_EXPECT_CLONES: "1"
 
   msrv:
     name: msrv (1.89)

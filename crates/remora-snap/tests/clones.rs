@@ -41,3 +41,19 @@ fn restored_files_are_cloned_where_the_filesystem_can() {
     assert_eq!(report.written, 2, "the unchanged file is not rewritten");
     check_restore_clones(&report, 2);
 }
+
+#[test]
+fn files_with_spaces_and_unicode_in_their_path_are_cloned_too() {
+    let fx = Fixture::new();
+    fx.write("mi proyecto ñandú 🦀/a.txt", "a");
+    let snap = fx.snapshotter();
+    let s = snap.snapshot(fx.root()).unwrap();
+    check_snapshot_clones(&s);
+    std::fs::remove_file(fx.root().join("mi proyecto ñandú 🦀/a.txt")).unwrap();
+
+    let report = snap.restore(fx.root(), &s.id).unwrap();
+
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert_eq!(fx.read("mi proyecto ñandú 🦀/a.txt"), "a");
+    check_restore_clones(&report, 1);
+}

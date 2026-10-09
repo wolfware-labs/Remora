@@ -27,6 +27,7 @@ hex = "0.4"
 hmac = "0.13"
 thiserror = "2"
 walkdir = "2"
+reflink-copy = "0.1.30"
 rusqlite = { version = "0.40", features = ["bundled"] }
 ed25519-dalek = "3"
 getrandom = "0.4"
