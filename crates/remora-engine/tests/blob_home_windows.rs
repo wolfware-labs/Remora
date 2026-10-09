@@ -17,6 +17,28 @@ fn drive(path: &Path) -> Option<Component<'_>> {
     path.components().next()
 }
 
+/// The folder's access list as `icacls /save` writes it (UTF-16LE), for failure messages.
+fn saved_sddl(dir: &Path) -> String {
+    let plain = dir.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
+    let dump = std::env::temp_dir().join(format!("remora-test-acl-{}.txt", std::process::id()));
+    let out = Command::new("icacls")
+        .arg(&plain)
+        .arg("/save")
+        .arg(&dump)
+        .arg("/q")
+        .output();
+    let bytes = fs::read(&dump);
+    let _ = fs::remove_file(&dump);
+    match (out, bytes) {
+        (Ok(_), Ok(bytes)) => {
+            let (pairs, _) = bytes.as_chunks::<2>();
+            let units: Vec<u16> = pairs.iter().map(|p| u16::from_le_bytes(*p)).collect();
+            String::from_utf16_lossy(&units)
+        }
+        (out, bytes) => format!("(could not save the access list: {out:?}, {bytes:?})"),
+    }
+}
+
 #[test]
 fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
     // The data directory on the system drive; the project on the drive under test (CI's
@@ -45,7 +67,15 @@ fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
         .last()
         .unwrap()
         .join(format!(".remora-store-{sid}"));
-    assert_eq!(status.blob_store, private.join(project_id(&root)).join("blobs"));
+    let expected = private.join(project_id(&root)).join("blobs");
+    if status.blob_store != expected {
+        panic!(
+            "the blobs are at {} instead of {}; the store folder's access list is:\n{}",
+            status.blob_store.display(),
+            expected.display(),
+            saved_sddl(&private)
+        );
+    }
     if let Ok(expect) = std::env::var("REMORA_EXPECT_CLONES") {
         assert_eq!(status.copy_on_write, Some(expect == "1"));
     }

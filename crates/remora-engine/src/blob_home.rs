@@ -29,7 +29,9 @@ fn private_name(sid: &str) -> String {
 }
 
 /// Whether every entry of a security descriptor's access list (SDDL, as `icacls /save`
-/// writes it) is for `sid` or SYSTEM. An empty list counts as not private.
+/// writes it) is for `sid` or SYSTEM. An empty list counts as not private. SDDL writes the
+/// built-in Administrator (RID 500) as the alias `LA`, so that trustee counts as `sid` when
+/// `sid` ends in `-500`.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn only_user_and_system(sddl: &str, sid: &str) -> bool {
     let Some(dacl) = sddl.split_once("D:").map(|(_, rest)| rest) else {
@@ -43,10 +45,11 @@ fn only_user_and_system(sddl: &str, sid: &str) -> bool {
         .filter_map(|ace| ace.split(')').next())
         .map(|ace| ace.rsplit(';').next().unwrap_or(""))
         .collect();
+    let built_in_administrator = sid.ends_with("-500");
     !trustees.is_empty()
         && trustees
             .iter()
-            .all(|t| *t == sid || *t == "SY" || *t == "S-1-5-18")
+            .all(|t| *t == sid || *t == "SY" || *t == "S-1-5-18" || (built_in_administrator && *t == "LA"))
 }
 
 /// Whether a project recorded in `data_dir` keeps its blobs under `private`: then Remora made
@@ -275,10 +278,8 @@ fn verify_acl(dir: &Path, sid: &str) -> io::Result<()> {
     let _ = fs::remove_file(&dump);
     let bytes = saved?;
     // UTF-16LE: the folder's name on the first line, its SDDL on the second.
-    let units: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
-        .collect();
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let units: Vec<u16> = pairs.iter().map(|p| u16::from_le_bytes(*p)).collect();
     let text = String::from_utf16_lossy(&units);
     let sddl = text.trim_start_matches('\u{feff}').lines().nth(1).unwrap_or("");
     if only_user_and_system(sddl, sid) {
@@ -607,6 +608,15 @@ mod tests {
             "another user"
         );
         assert!(!only_user_and_system("D:PAI", me), "an empty list");
+        let admin = "S-1-5-21-1-2-3-500";
+        assert!(
+            only_user_and_system("O:LAD:PAI(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)", admin),
+            "the built-in Administrator's alias"
+        );
+        assert!(
+            !only_user_and_system("D:PAI(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)", me),
+            "LA is not another RID's alias"
+        );
         assert!(!only_user_and_system("garbage", me));
     }
 
