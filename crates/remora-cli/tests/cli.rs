@@ -312,8 +312,7 @@ fn a_socket_folder_open_to_others_is_reported_as_unsafe() {
     )
     .unwrap();
     let runtime = tempfile::TempDir::new().unwrap();
-    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o755))
-        .unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     let repo = tempfile::TempDir::new().unwrap();
     std::fs::create_dir(repo.path().join(".git")).unwrap();
 
