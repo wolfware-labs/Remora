@@ -70,6 +70,7 @@ fn blob_folder(parent: &Path, root: &Path) -> PathBuf {
     let blobs = store_dir.join(project_id(root)).join("blobs");
     fs::create_dir_all(&blobs).unwrap();
     fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o700)).unwrap();
+    fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).unwrap();
     blobs
 }
 
@@ -102,6 +103,25 @@ fn a_blob_folder_open_to_other_users_is_refused() {
     let blobs = blob_folder(&elsewhere.path().canonicalize().unwrap(), &root);
     let store_dir = blobs.parent().unwrap().parent().unwrap();
     fs::set_permissions(store_dir, fs::Permissions::from_mode(0o755)).unwrap();
+    Engine::open(data.path()).unwrap();
+    record_blobs(data.path(), &root, &blobs);
+
+    let engine = Engine::open(data.path()).unwrap();
+
+    assert!(matches!(
+        engine.project(&root),
+        Err(EngineError::BlobStoreUnavailable { .. })
+    ));
+}
+
+#[test]
+fn a_recorded_blob_folder_whose_anchor_others_may_write_in_is_refused() {
+    let data = TempDir::new().unwrap();
+    let project = TempDir::new().unwrap();
+    let elsewhere = TempDir::new().unwrap();
+    let root = project.path().canonicalize().unwrap();
+    let blobs = blob_folder(&elsewhere.path().canonicalize().unwrap(), &root);
+    fs::set_permissions(elsewhere.path(), fs::Permissions::from_mode(0o777)).unwrap();
     Engine::open(data.path()).unwrap();
     record_blobs(data.path(), &root, &blobs);
 

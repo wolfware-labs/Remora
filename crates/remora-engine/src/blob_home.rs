@@ -20,17 +20,27 @@ pub(crate) struct Ancestor {
     pub path: PathBuf,
     pub volume: u64,
     pub owner: u32,
+    /// Permission bits (Unix).
+    pub mode: u32,
+}
+
+/// Whether a folder with `mode` lets other users rename what is inside it: writable by
+/// group or others, without the sticky bit that would stop them.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn open_to_others(mode: u32) -> bool {
+    mode & 0o022 != 0 && mode & 0o1000 == 0
 }
 
 /// The anchor for a project on `volume`: the highest of `ancestors` (the project's parent
 /// first, then upward) still on that volume and owned by `owner`. Never the project root
-/// itself, so the store is never inside the project.
+/// itself, so the store is never inside the project. A folder other users may write in
+/// without the sticky bit is skipped: they could replace `.remora-store` in it.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn pick_anchor(ancestors: &[Ancestor], volume: u64, owner: u32) -> Option<PathBuf> {
     ancestors
         .iter()
         .take_while(|a| a.volume == volume)
-        .filter(|a| a.owner == owner)
+        .filter(|a| a.owner == owner && !open_to_others(a.mode))
         .last()
         .map(|a| a.path.clone())
 }
@@ -81,7 +91,22 @@ pub(crate) fn check(blobs: &Path, data_dir: &Path) -> Result<(), EngineError> {
         .filter(|dir| dir.file_name().is_some_and(|name| name == STORE_DIR))
         .ok_or_else(|| unavailable(format!("it is not inside a {STORE_DIR} folder")))?;
     let owner = owner_of(data_dir).map_err(|e| unavailable(e.to_string()))?;
-    check_private(store_dir, owner).map_err(|e| unavailable(e.to_string()))
+    check_private(store_dir, owner).map_err(|e| unavailable(e.to_string()))?;
+    // Another user able to rename `.remora-store` in its anchor could redirect the blobs.
+    #[cfg(unix)]
+    if let Some(anchor) = store_dir.parent() {
+        use std::os::unix::fs::MetadataExt;
+        let mode = fs::metadata(anchor)
+            .map_err(|e| unavailable(e.to_string()))?
+            .mode();
+        if open_to_others(mode) {
+            return Err(unavailable(format!(
+                "{} can be changed by other users",
+                anchor.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Create (or reuse) `<anchor>/.remora-store/<id>/blobs`, refusing a `.remora-store` that
@@ -118,6 +143,7 @@ fn anchor(root: &Path, data_dir: &Path) -> io::Result<Option<(PathBuf, u32)>> {
                 path: path.to_path_buf(),
                 volume: m.dev(),
                 owner: m.uid(),
+                mode: m.mode(),
             })
         })
         .collect();
@@ -185,6 +211,7 @@ mod tests {
             path: PathBuf::from(path),
             volume,
             owner,
+            mode: 0o755,
         }
     }
 
@@ -223,5 +250,50 @@ mod tests {
             at("/mnt", 2, 1000),
         ];
         assert_eq!(pick_anchor(&nested, 2, 1000), Some(PathBuf::from("/mnt/x/me")));
+    }
+
+    #[test]
+    fn a_folder_others_may_write_in_is_never_the_anchor() {
+        let open = Ancestor {
+            mode: 0o777,
+            ..at("/mnt/work", 2, 1000)
+        };
+        let sticky = Ancestor {
+            mode: 0o1777,
+            ..at("/mnt/work", 2, 1000)
+        };
+        let mine = at("/mnt/work/me", 2, 1000);
+        assert_eq!(
+            pick_anchor(&[mine.clone(), open], 2, 1000),
+            Some(PathBuf::from("/mnt/work/me"))
+        );
+        assert_eq!(
+            pick_anchor(&[mine, sticky], 2, 1000),
+            Some(PathBuf::from("/mnt/work"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn an_open_or_symlinked_store_folder_is_refused_when_first_chosen() {
+        use std::os::unix::fs::PermissionsExt;
+        let anchor = tempfile::TempDir::new().unwrap();
+        let owner = owner_of(anchor.path()).unwrap();
+        let store_dir = anchor.path().join(STORE_DIR);
+        fs::create_dir(&store_dir).unwrap();
+        fs::set_permissions(&store_dir, fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            prepare(anchor.path(), "0123456789abcdef", owner).is_err(),
+            "open to others"
+        );
+
+        let elsewhere = tempfile::TempDir::new().unwrap();
+        fs::remove_dir(&store_dir).unwrap();
+        std::os::unix::fs::symlink(elsewhere.path(), &store_dir).unwrap();
+        assert!(
+            prepare(anchor.path(), "0123456789abcdef", owner).is_err(),
+            "a symlink"
+        );
     }
 }
