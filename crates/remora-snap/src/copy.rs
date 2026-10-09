@@ -268,6 +268,7 @@ impl Snapshotter for CopySnapshotter {
             id,
             unprotected,
             hashed_files,
+            cloned_files: 0,
         })
     }
 

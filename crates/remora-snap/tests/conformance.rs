@@ -7,7 +7,7 @@ mod common;
 use std::fs;
 use std::path::Path;
 
-use common::{EXCLUDED, Fixture, tree_state};
+use common::{EXCLUDED, Fixture, check_snapshot_clones, expect_clones, tree_state};
 use proptest::prelude::*;
 use remora_snap::Snapshotter;
 
@@ -106,6 +106,7 @@ proptest! {
         }
         let expected = tree_state(fx.root(), EXCLUDED);
         let s = snap.snapshot(fx.root()).unwrap();
+        check_snapshot_clones(&s);
 
         for op in &after {
             apply(fx.root(), op);
@@ -113,6 +114,10 @@ proptest! {
         let report = snap.restore(fx.root(), &s.id).unwrap();
 
         prop_assert!(report.failed.is_empty(), "restore failures: {:?}", report.failed);
+        prop_assert!(report.cloned <= report.written);
+        if expect_clones() == Some(false) {
+            prop_assert_eq!(report.cloned, 0);
+        }
         prop_assert_eq!(tree_state(fx.root(), EXCLUDED), expected);
     }
 

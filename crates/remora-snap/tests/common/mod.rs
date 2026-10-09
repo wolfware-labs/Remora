@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
-use remora_snap::{CopySnapshotter, SnapOptions};
+use remora_snap::{CopySnapshotter, RestoreReport, SnapOptions, Snapshot};
 use tempfile::TempDir;
 
 /// Observable state of one path, compared before and after restore.
@@ -25,8 +25,8 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         Self {
-            project: TempDir::new().unwrap(),
-            store: TempDir::new().unwrap(),
+            project: test_dir(),
+            store: test_dir(),
         }
     }
 
@@ -54,6 +54,50 @@ impl Fixture {
 
     pub fn exists(&self, rel: &str) -> bool {
         fs::symlink_metadata(self.root().join(rel)).is_ok()
+    }
+}
+
+/// A temporary directory on the filesystem under test: under `REMORA_TEST_FS` when it is set
+/// (CI mounts btrfs, XFS, ext4, ReFS there), else in the system temp directory.
+pub fn test_dir() -> TempDir {
+    match std::env::var_os("REMORA_TEST_FS") {
+        Some(dir) => TempDir::new_in(dir).unwrap(),
+        None => TempDir::new().unwrap(),
+    }
+}
+
+/// `REMORA_EXPECT_CLONES`: `Some(true)` when every stored and restored file must be cloned,
+/// `Some(false)` when none may be, `None` when the filesystem under test is not known.
+pub fn expect_clones() -> Option<bool> {
+    match std::env::var("REMORA_EXPECT_CLONES").as_deref() {
+        Ok("1") => Some(true),
+        Ok("0") => Some(false),
+        _ => None,
+    }
+}
+
+/// Check a snapshot's clone counter against `REMORA_EXPECT_CLONES`.
+pub fn check_snapshot_clones(snapshot: &Snapshot) {
+    match expect_clones() {
+        Some(true) => assert_eq!(
+            snapshot.cloned_files, snapshot.hashed_files,
+            "every stored file should have been cloned"
+        ),
+        Some(false) => assert_eq!(snapshot.cloned_files, 0, "nothing should have been cloned"),
+        None => {}
+    }
+}
+
+/// Check a restore's clone counter against `REMORA_EXPECT_CLONES`, given how many regular files
+/// it had to write.
+pub fn check_restore_clones(report: &RestoreReport, files_written: usize) {
+    match expect_clones() {
+        Some(true) => assert_eq!(
+            report.cloned, files_written,
+            "every restored file should have been cloned"
+        ),
+        Some(false) => assert_eq!(report.cloned, 0, "nothing should have been cloned"),
+        None => {}
     }
 }
 

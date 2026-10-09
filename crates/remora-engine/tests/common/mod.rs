@@ -17,8 +17,8 @@ pub struct Fixture {
 impl Fixture {
     pub fn new() -> Self {
         Self {
-            data: TempDir::new().unwrap(),
-            project: TempDir::new().unwrap(),
+            data: test_dir(),
+            project: test_dir(),
         }
     }
 
@@ -46,6 +46,15 @@ impl Fixture {
 
     pub fn exists(&self, rel: &str) -> bool {
         fs::symlink_metadata(self.root().join(rel)).is_ok()
+    }
+}
+
+/// A temporary directory on the filesystem under test: under `REMORA_TEST_FS` when it is set,
+/// else in the system temp directory.
+pub fn test_dir() -> TempDir {
+    match std::env::var_os("REMORA_TEST_FS") {
+        Some(dir) => TempDir::new_in(dir).unwrap(),
+        None => TempDir::new().unwrap(),
     }
 }
 

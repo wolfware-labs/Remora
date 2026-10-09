@@ -46,6 +46,8 @@ pub struct Snapshot {
     pub unprotected: Vec<PathBuf>,
     /// How many files had to be read and hashed (the rest were unchanged per the stat cache).
     pub hashed_files: usize,
+    /// How many of the hashed files were stored by cloning (copy-on-write) instead of copying.
+    pub cloned_files: usize,
 }
 
 /// Result of a restore.
@@ -53,6 +55,8 @@ pub struct Snapshot {
 pub struct RestoreReport {
     /// Files and symlinks written.
     pub written: usize,
+    /// How many of the written files were restored by cloning (copy-on-write) instead of copying.
+    pub cloned: usize,
     /// Paths removed because they did not exist in the snapshot.
     pub deleted: usize,
     /// Paths left untouched because the snapshot could not protect them.
