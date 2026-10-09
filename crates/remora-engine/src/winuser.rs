@@ -1,11 +1,14 @@
 //! The Windows user's SID, read with `whoami` (Remora uses no `unsafe`, so no Windows API
 //! calls). The daemon's named pipe and the blob stores on other drives grant access to it.
 
+#[cfg(windows)]
 use std::path::Path;
+#[cfg(windows)]
 use std::process::{Command, Stdio};
 
 /// The SID of the user running this process, from `whoami`; `None` if it cannot be read
 /// (always on other systems than Windows).
+#[cfg(windows)]
 pub fn user_sid() -> Option<String> {
     let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
     let output = Command::new(Path::new(&root).join(r"System32\whoami.exe"))
@@ -20,8 +23,16 @@ pub fn user_sid() -> Option<String> {
     parse_whoami_sid(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// The SID of the user running this process, from `whoami`; `None` if it cannot be read
+/// (always on other systems than Windows).
+#[cfg(not(windows))]
+pub fn user_sid() -> Option<String> {
+    None
+}
+
 /// The SID in `whoami /user /fo csv /nh` output (`"host\user","S-1-5-21-…"`): `S-1-`
 /// followed by numbers, so nothing else can reach a security descriptor or a command line.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn parse_whoami_sid(output: &str) -> Option<String> {
     let field = output.trim().rsplit(',').next()?.trim().trim_matches('"');
     let valid = field.strip_prefix("S-1-").is_some_and(|rest| {

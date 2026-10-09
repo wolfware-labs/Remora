@@ -4,11 +4,11 @@
 //!
 //! ```text
 //! Unix     <anchor>/.remora-store/<project id>/blobs        <anchor>: see `pick_anchor`
-//! Windows  <drive>:\.remora-store\<user SID>\<project id>\blobs
+//! Windows  <drive>:\.remora-store-<user SID>\<project id>\blobs
 //! ```
 //!
-//! The private folder (`.remora-store` on Unix, `<user SID>` on Windows) is owner-only:
-//! mode 0700 on Unix, an `icacls` grant to the user and SYSTEM alone on Windows.
+//! The private folder (`.remora-store` on Unix, `.remora-store-<user SID>` at the drive's root on Windows) is owner-only:
+//! mode 0700 on Unix; on Windows owned by the user, with an `icacls` access list of the user and SYSTEM alone, re-applied at every open.
 
 use std::ffi::OsString;
 use std::fs;
@@ -21,6 +21,12 @@ use crate::fsutil;
 
 /// The folder created in the anchor.
 pub(crate) const STORE_DIR: &str = ".remora-store";
+
+/// The private folder at a drive's root on Windows: `.remora-store-<user SID>`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn private_name(sid: &str) -> String {
+    format!("{STORE_DIR}-{sid}")
+}
 
 /// One ancestor of a project root: its path, volume and owner (Unix; on Windows the anchor
 /// is the drive's root).
@@ -95,34 +101,46 @@ pub(crate) fn check(blobs: &Path, data_dir: &Path) -> Result<(), EngineError> {
             "it does not exist (is its volume mounted?)".to_owned(),
         ));
     }
-    // `<private>/<id>/blobs`, with `<private>` inside `.remora-store` on Windows.
+    // `<private>/<id>/blobs`.
     let private = blobs
         .ancestors()
         .nth(2)
-        .filter(|dir| {
-            let store_dir = if cfg!(windows) { dir.parent() } else { Some(*dir) };
-            store_dir
-                .and_then(Path::file_name)
-                .is_some_and(|name| name == STORE_DIR)
-        })
-        .ok_or_else(|| unavailable(format!("it is not inside a {STORE_DIR} folder")))?;
-    let owner = owner_of(data_dir).map_err(|e| unavailable(e.to_string()))?;
-    check_private(private, owner).map_err(|e| unavailable(e.to_string()))?;
+        .ok_or_else(|| unavailable("it is not inside a private store folder".to_owned()))?;
+    recheck_private(private, data_dir).map_err(unavailable)
+}
+
+/// Unix: `.remora-store`, owned by the data directory's owner, closed to others, in an
+/// anchor other users may not write in.
+#[cfg(not(windows))]
+fn recheck_private(private: &Path, data_dir: &Path) -> Result<(), String> {
+    if private.file_name() != Some(std::ffi::OsStr::new(STORE_DIR)) {
+        return Err(format!("it is not inside a {STORE_DIR} folder"));
+    }
+    let owner = owner_of(data_dir).map_err(|e| e.to_string())?;
+    check_private(private, owner).map_err(|e| e.to_string())?;
     // Another user able to rename `.remora-store` in its anchor could redirect the blobs.
     #[cfg(unix)]
     if let Some(anchor) = private.parent() {
         use std::os::unix::fs::MetadataExt;
-        let mode = fs::metadata(anchor)
-            .map_err(|e| unavailable(e.to_string()))?
-            .mode();
+        let mode = fs::metadata(anchor).map_err(|e| e.to_string())?.mode();
         if open_to_others(mode) {
-            return Err(unavailable(format!(
-                "{} can be changed by other users",
-                anchor.display()
-            )));
+            return Err(format!("{} can be changed by other users", anchor.display()));
         }
     }
     Ok(())
+}
+
+/// Windows: this user's `.remora-store-<SID>`, a real folder, its access list re-applied
+/// (whatever another user may have changed does not survive).
+#[cfg(windows)]
+fn recheck_private(private: &Path, _data_dir: &Path) -> Result<(), String> {
+    let sid = crate::user_sid().ok_or_else(|| "cannot read the user's SID with whoami".to_owned())?;
+    let name = private_name(&sid);
+    if private.file_name() != Some(std::ffi::OsStr::new(&name)) {
+        return Err(format!("it is not inside your {name} folder"));
+    }
+    check_private(private, 0).map_err(|e| e.to_string())?;
+    run_icacls(&icacls_steps(private, &sid, false, false)).map_err(|e| e.to_string())
 }
 
 /// Create (or reuse) `<anchor>/.remora-store/<id>/blobs`, refusing a `.remora-store` that
@@ -142,23 +160,34 @@ fn prepare(anchor: &Path, id: &str, owner: u32) -> io::Result<PathBuf> {
     Ok(blobs)
 }
 
-/// Create (or reuse) `<drive>:\.remora-store\<SID>\<id>\blobs`, with the `<SID>` folder
-/// granted to the user and SYSTEM alone.
+/// Create (or reuse) `<drive>:\.remora-store-<SID>\<id>\blobs`: the folder at the drive's
+/// root becomes the user's, with an access list of the user and SYSTEM alone, before
+/// anything is created in it.
 #[cfg(windows)]
 fn prepare(anchor: &Path, id: &str, _owner: u32) -> io::Result<PathBuf> {
     let sid = crate::user_sid().ok_or_else(|| io::Error::other("cannot read the user's SID with whoami"))?;
-    let store_dir = anchor.join(STORE_DIR);
-    let private = store_dir.join(&sid);
-    for dir in [&store_dir, &private] {
-        match fs::create_dir(dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
-        }
+    // At the drive's root, not inside a shared folder: other users may not rename what is
+    // in the root unless they own it.
+    let private = anchor.join(private_name(&sid));
+    match fs::create_dir(&private) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(e),
     }
     check_private(&private, 0)?;
+    // A folder someone else made first is taken over, or refused if they kept it.
+    let has_contents = fs::read_dir(&private)?.next().is_some();
+    run_icacls(&icacls_steps(&private, &sid, true, has_contents))?;
+    let blobs = private.join(id).join("blobs");
+    fs::create_dir_all(&blobs)?;
+    Ok(blobs)
+}
+
+/// Run each `icacls` step, failing on the first that fails.
+#[cfg(windows)]
+fn run_icacls(steps: &[Vec<OsString>]) -> io::Result<()> {
     let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    for args in icacls_steps(&private, &sid) {
+    for args in steps {
         let status = std::process::Command::new(Path::new(&system_root).join(r"System32\icacls.exe"))
             .args(args)
             .stdin(std::process::Stdio::null())
@@ -169,35 +198,47 @@ fn prepare(anchor: &Path, id: &str, _owner: u32) -> io::Result<PathBuf> {
             return Err(io::Error::other(format!("icacls failed: {status}")));
         }
     }
-    let blobs = private.join(id).join("blobs");
-    fs::create_dir_all(&blobs)?;
-    Ok(blobs)
+    Ok(())
 }
 
-/// The `icacls` runs making `dir` (and what is created in it) the user's and SYSTEM's alone:
-/// inherited entries removed and full control granted to the two SIDs, then the entries a
-/// folder may get when an elevated process creates it (Administrators, CREATOR OWNER)
-/// removed.
+/// The `icacls` runs making `dir` the user's and SYSTEM's alone: optionally take ownership
+/// of it and everything in it; remove inherited entries and grant full control to the two
+/// SIDs; remove the entries a folder made by an elevated process carries (Administrators,
+/// CREATOR OWNER); optionally reset everything inside so it inherits only that.
 #[cfg_attr(not(windows), allow(dead_code))]
-fn icacls_steps(dir: &Path, sid: &str) -> [Vec<OsString>; 2] {
+fn icacls_steps(dir: &Path, sid: &str, take_ownership: bool, reset_contents: bool) -> Vec<Vec<OsString>> {
     let dir = without_verbatim_prefix(dir).into_os_string();
-    [
-        vec![
+    let mut steps = Vec::new();
+    if take_ownership {
+        steps.push(vec![
             dir.clone(),
-            "/inheritance:r".into(),
-            "/grant:r".into(),
-            format!("*{sid}:(OI)(CI)F").into(),
-            "*S-1-5-18:(OI)(CI)F".into(),
+            "/setowner".into(),
+            format!("*{sid}").into(),
+            "/T".into(),
             "/q".into(),
-        ],
-        vec![
-            dir,
-            "/remove:g".into(),
-            "*S-1-5-32-544".into(),
-            "*S-1-3-0".into(),
-            "/q".into(),
-        ],
-    ]
+        ]);
+    }
+    steps.push(vec![
+        dir.clone(),
+        "/inheritance:r".into(),
+        "/grant:r".into(),
+        format!("*{sid}:(OI)(CI)F").into(),
+        "*S-1-5-18:(OI)(CI)F".into(),
+        "/q".into(),
+    ]);
+    steps.push(vec![
+        dir.clone(),
+        "/remove:g".into(),
+        "*S-1-5-32-544".into(),
+        "*S-1-3-0".into(),
+        "/q".into(),
+    ]);
+    if reset_contents {
+        let mut inside = dir;
+        inside.push("\\*");
+        steps.push(vec![inside, "/reset".into(), "/T".into(), "/q".into()]);
+    }
+    steps
 }
 
 /// A verbatim `\\?\R:\x` as `R:\x`: tools such as `icacls` do not take verbatim paths.
@@ -275,6 +316,7 @@ fn owner_of(path: &Path) -> io::Result<u32> {
 }
 
 #[cfg(not(unix))]
+#[allow(dead_code)]
 fn owner_of(_path: &Path) -> io::Result<u32> {
     Ok(0)
 }
@@ -413,8 +455,8 @@ mod tests {
 
     #[test]
     fn icacls_grants_the_user_and_system_alone() {
-        let dir = Path::new(r"\\?\R:\.remora-store\S-1-5-21-1-2-3-1013");
-        let steps: Vec<Vec<String>> = icacls_steps(dir, "S-1-5-21-1-2-3-1013")
+        let dir = Path::new(r"\\?\R:\.remora-store-S-1-5-21-1-2-3-1013");
+        let steps: Vec<Vec<String>> = icacls_steps(dir, "S-1-5-21-1-2-3-1013", true, true)
             .into_iter()
             .map(|args| args.into_iter().map(|a| a.into_string().unwrap()).collect())
             .collect();
@@ -422,7 +464,14 @@ mod tests {
             steps,
             [
                 vec![
-                    r"R:\.remora-store\S-1-5-21-1-2-3-1013",
+                    r"R:\.remora-store-S-1-5-21-1-2-3-1013",
+                    "/setowner",
+                    "*S-1-5-21-1-2-3-1013",
+                    "/T",
+                    "/q",
+                ],
+                vec![
+                    r"R:\.remora-store-S-1-5-21-1-2-3-1013",
                     "/inheritance:r",
                     "/grant:r",
                     "*S-1-5-21-1-2-3-1013:(OI)(CI)F",
@@ -430,13 +479,19 @@ mod tests {
                     "/q",
                 ],
                 vec![
-                    r"R:\.remora-store\S-1-5-21-1-2-3-1013",
+                    r"R:\.remora-store-S-1-5-21-1-2-3-1013",
                     "/remove:g",
                     "*S-1-5-32-544",
                     "*S-1-3-0",
                     "/q",
                 ],
+                vec![r"R:\.remora-store-S-1-5-21-1-2-3-1013\*", "/reset", "/T", "/q",],
             ]
+        );
+        assert_eq!(
+            icacls_steps(dir, "S-1-5-21-1-2-3-1013", false, false).len(),
+            2,
+            "two grant and remove steps without take_ownership or reset_contents"
         );
         assert_eq!(
             without_verbatim_prefix(Path::new(r"\\?\UNC\server\share")),

@@ -1,5 +1,5 @@
 //! On Windows, a project on another drive keeps its blobs in
-//! `<drive>:\.remora-store\<user SID>\<project id>\blobs`, granted to the user and SYSTEM alone.
+//! `<drive>:\.remora-store-<user SID>\<project id>\blobs`, granted to the user and SYSTEM alone.
 #![cfg(windows)]
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
@@ -40,7 +40,11 @@ fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
         return;
     }
     let sid = user_sid().expect("whoami reports the user's SID");
-    let private = root.ancestors().last().unwrap().join(".remora-store").join(&sid);
+    let private = root
+        .ancestors()
+        .last()
+        .unwrap()
+        .join(format!(".remora-store-{sid}"));
     assert_eq!(status.blob_store, private.join(project_id(&root)).join("blobs"));
     if let Ok(expect) = std::env::var("REMORA_EXPECT_CLONES") {
         assert_eq!(status.copy_on_write, Some(expect == "1"));
@@ -49,9 +53,13 @@ fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
     // Read the folder's access list back: the user and SYSTEM, nobody else.
     let plain = private.to_string_lossy().trim_start_matches(r"\\?\").to_owned();
     let out = Command::new("icacls").arg(&plain).output().unwrap();
+    assert!(out.status.success(), "icacls should succeed");
     let text = String::from_utf8_lossy(&out.stdout);
     let entries: Vec<&str> = text.lines().filter(|l| l.contains(":(")).collect();
     assert_eq!(entries.len(), 2, "{text}");
     assert!(entries.iter().any(|e| e.contains("SYSTEM")), "{text}");
-    assert!(!text.contains("Everyone") && !text.contains("Users"), "{text}");
+    if let Ok(username) = std::env::var("USERNAME") {
+        assert!(text.contains(&username), "{text}");
+    }
+    assert!(!text.contains("Everyone"), "{text}");
 }
