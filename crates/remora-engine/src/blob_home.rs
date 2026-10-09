@@ -28,6 +28,27 @@ fn private_name(sid: &str) -> String {
     format!("{STORE_DIR}-{sid}")
 }
 
+/// Whether every entry of a security descriptor's access list (SDDL, as `icacls /save`
+/// writes it) is for `sid` or SYSTEM. An empty list counts as not private.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn only_user_and_system(sddl: &str, sid: &str) -> bool {
+    let Some(dacl) = sddl.split_once("D:").map(|(_, rest)| rest) else {
+        return false;
+    };
+    // A SACL, if any, follows the DACL.
+    let dacl = dacl.split_once("S:").map_or(dacl, |(d, _)| d);
+    let trustees: Vec<&str> = dacl
+        .split('(')
+        .skip(1)
+        .filter_map(|ace| ace.split(')').next())
+        .map(|ace| ace.rsplit(';').next().unwrap_or(""))
+        .collect();
+    !trustees.is_empty()
+        && trustees
+            .iter()
+            .all(|t| *t == sid || *t == "SY" || *t == "S-1-5-18")
+}
+
 /// Whether a project recorded in `data_dir` keeps its blobs under `private`: then Remora made
 /// that folder for this user earlier, and it may be used again.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -158,7 +179,9 @@ fn recheck_private(private: &Path, blobs: &Path, _data_dir: &Path) -> Result<(),
     for dir in [private, blobs.parent().unwrap_or(blobs), blobs] {
         check_private(dir, 0).map_err(|e| e.to_string())?;
     }
-    run_icacls(&icacls_steps(private, &sid)).map_err(|e| e.to_string())
+    run_icacls(&icacls_steps(private, &sid))
+        .and_then(|()| verify_acl(private, &sid))
+        .map_err(|e| e.to_string())
 }
 
 /// Create (or reuse) `<anchor>/.remora-store/<id>/blobs`, refusing a `.remora-store` that
@@ -203,6 +226,7 @@ fn prepare(anchor: &Path, id: &str, _owner: u32, data_dir: &Path) -> io::Result<
     }
     check_private(&private, 0)?;
     run_icacls(&icacls_steps(&private, &sid))?;
+    verify_acl(&private, &sid)?;
     let id_dir = private.join(id);
     let blobs = id_dir.join("blobs");
     for dir in [&id_dir, &blobs] {
@@ -234,11 +258,45 @@ fn run_icacls(steps: &[Vec<OsString>]) -> io::Result<()> {
     Ok(())
 }
 
+/// Read `dir`'s access list back in SID form (not localized names) and refuse it unless
+/// only the user and SYSTEM are on it.
+#[cfg(windows)]
+fn verify_acl(dir: &Path, sid: &str) -> io::Result<()> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dump = std::env::temp_dir().join(format!("remora-acl-{}-{n}.txt", std::process::id()));
+    let saved = run_icacls(&[vec![
+        without_verbatim_prefix(dir).into_os_string(),
+        "/save".into(),
+        dump.clone().into_os_string(),
+        "/q".into(),
+    ]])
+    .and_then(|()| fs::read(&dump));
+    let _ = fs::remove_file(&dump);
+    let bytes = saved?;
+    // UTF-16LE: the folder's name on the first line, its SDDL on the second.
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect();
+    let text = String::from_utf16_lossy(&units);
+    let sddl = text.trim_start_matches('\u{feff}').lines().nth(1).unwrap_or("");
+    if only_user_and_system(sddl, sid) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} is open to other users: {sddl}", dir.display()),
+        ))
+    }
+}
+
 /// The `icacls` runs making `dir` the user's and SYSTEM's alone: the user becomes its owner
 /// (a folder made by an elevated process belongs to Administrators); inherited entries are
-/// removed and full control granted to the two SIDs; the entries a folder made by an elevated
-/// process carries (Administrators, CREATOR OWNER) are removed. Nothing is recursive: only
-/// folders Remora made are ever handled.
+/// removed and full control granted to the two SIDs; the entries a folder can carry from its
+/// drive or from an elevated creator (Administrators, CREATOR OWNER, Users, Everyone,
+/// Authenticated Users) are removed. Nothing is recursive: only folders Remora made are ever
+/// handled.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn icacls_steps(dir: &Path, sid: &str) -> [Vec<OsString>; 3] {
     let dir = without_verbatim_prefix(dir).into_os_string();
@@ -262,6 +320,9 @@ fn icacls_steps(dir: &Path, sid: &str) -> [Vec<OsString>; 3] {
             "/remove:g".into(),
             "*S-1-5-32-544".into(),
             "*S-1-3-0".into(),
+            "*S-1-5-32-545".into(),
+            "*S-1-1-0".into(),
+            "*S-1-5-11".into(),
             "/q".into(),
         ],
     ]
@@ -508,6 +569,9 @@ mod tests {
                     "/remove:g",
                     "*S-1-5-32-544",
                     "*S-1-3-0",
+                    "*S-1-5-32-545",
+                    "*S-1-1-0",
+                    "*S-1-5-11",
                     "/q",
                 ],
             ]
@@ -517,6 +581,33 @@ mod tests {
             PathBuf::from(r"\\?\UNC\server\share"),
             "network paths are left alone"
         );
+    }
+
+    #[test]
+    fn only_the_user_and_system_may_be_on_the_store_folder() {
+        let me = "S-1-5-21-1-2-3-1013";
+        assert!(only_user_and_system(
+            "O:S-1-5-21-1-2-3-1013D:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-1013)(A;OICI;FA;;;SY)",
+            me
+        ));
+        assert!(only_user_and_system(
+            "D:P(A;OICI;FA;;;S-1-5-18)(A;OICI;FA;;;S-1-5-21-1-2-3-1013)",
+            me
+        ));
+        assert!(
+            !only_user_and_system("D:PAI(A;OICI;FA;;;S-1-5-21-1-2-3-1013)(A;OICI;0x1200a9;;;BU)", me),
+            "Users"
+        );
+        assert!(
+            !only_user_and_system("D:PAI(A;OICI;FA;;;SY)(A;OICI;0x1200a9;;;WD)", me),
+            "Everyone"
+        );
+        assert!(
+            !only_user_and_system("D:PAI(A;OICI;FA;;;S-1-5-21-9-9-9-1001)", me),
+            "another user"
+        );
+        assert!(!only_user_and_system("D:PAI", me), "an empty list");
+        assert!(!only_user_and_system("garbage", me));
     }
 
     #[test]
