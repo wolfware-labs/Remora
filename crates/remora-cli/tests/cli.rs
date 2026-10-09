@@ -294,3 +294,42 @@ fn a_late_checkpoint_is_labelled_in_log_and_its_preview_warns() {
     let out = stdout(&rewind);
     assert!(out.contains("taken after the command may have started"), "{out}");
 }
+
+#[cfg(unix)]
+#[test]
+fn a_socket_folder_open_to_others_is_reported_as_unsafe() {
+    use std::os::unix::fs::PermissionsExt;
+    // A data directory long enough that its socket goes to the runtime folder, and a
+    // runtime folder other users could write in.
+    let parent = tempfile::TempDir::new().unwrap();
+    let data = parent.path().join("d".repeat(110));
+    std::fs::create_dir(&data).unwrap();
+    // Create a secret so the client progresses to the socket directory check.
+    // The secret is 32 bytes in hex (64 characters).
+    std::fs::write(
+        data.join("remorad.secret"),
+        b"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    )
+    .unwrap();
+    let runtime = tempfile::TempDir::new().unwrap();
+    std::fs::set_permissions(runtime.path(), std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    let repo = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(repo.path().join(".git")).unwrap();
+
+    let out = std::process::Command::new(REMORA)
+        .args(["status", "--data-dir"])
+        .arg(&data)
+        .arg("--root")
+        .arg(repo.path())
+        .env("XDG_RUNTIME_DIR", runtime.path())
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(4), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("unsafe socket directory"),
+        "{}",
+        stderr(&out)
+    );
+}

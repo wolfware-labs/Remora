@@ -186,6 +186,23 @@ mod tests {
         assert!(sleeper.try_wait().unwrap().is_some(), "killed and reaped");
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn a_child_past_its_limit_is_stopped() {
+        let mut slow = Command::new("ping")
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(Stdio::null())
+            .spawn()
+            .unwrap();
+        let started = Instant::now();
+
+        let status = wait_at_most(&mut slow, Duration::from_millis(200)).unwrap();
+
+        assert_eq!(status, None);
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(slow.try_wait().unwrap().is_some(), "killed and reaped");
+    }
+
     #[cfg(unix)]
     #[test]
     fn a_child_within_its_limit_reports_how_it_exited() {
