@@ -79,7 +79,8 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<fs::File> {
     fs::OpenOptions::new().write(true).create_new(true).open(path)
 }
 
-/// Make an existing file owner-only (0600) on Unix; a clone keeps its source's mode.
+/// Make an existing file writable by its owner alone: 0600 on Unix, not read-only on Windows.
+/// A clone keeps its source's permissions.
 #[cfg(unix)]
 pub(crate) fn set_private(path: &Path) -> io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -87,8 +88,11 @@ pub(crate) fn set_private(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn set_private(_path: &Path) -> io::Result<()> {
-    Ok(())
+pub(crate) fn set_private(path: &Path) -> io::Result<()> {
+    let mut permissions = fs::metadata(path)?.permissions();
+    #[allow(clippy::permissions_set_readonly_false)] // Windows: only clears the read-only attribute
+    permissions.set_readonly(false);
+    fs::set_permissions(path, permissions)
 }
 
 /// Modification time in nanoseconds since the Unix epoch, if the platform reports one.

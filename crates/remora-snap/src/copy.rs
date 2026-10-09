@@ -72,14 +72,10 @@ impl CopySnapshotter {
         File::open(abs).map_err(StoreError::Source)?;
         let tmp = self.store.join("blobs").join("tmp").join(temp_name("blob"));
         let result = (|| {
-            let (tmp, cloned) = clone_or_copy(abs, &tmp).map_err(|e| {
-                if fs::metadata(abs).is_err() {
-                    StoreError::Source(e)
-                } else {
-                    StoreError::Store(io_at(&tmp)(e))
-                }
+            let (tmp, cloned) = clone_or_copy(abs, &tmp).map_err(|e| match e {
+                CopyError::Read(e) => StoreError::Source(e),
+                CopyError::Write(e) => StoreError::Store(io_at(&tmp)(e)),
             })?;
-            platform::set_private(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
             let (hash, size) = hash_and_size(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
             let path = self.blob_path(&hash);
             // A blob whose size is wrong (say, truncated by a crash) is replaced.
@@ -111,8 +107,10 @@ impl CopySnapshotter {
             abs.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
         ));
         let result = (|| {
-            let (tmp, cloned) = clone_or_copy(&blob, &tmp)
-                .map_err(|e| io::Error::new(e.kind(), format!("reading blob {hash}: {e}")))?;
+            let (tmp, cloned) = clone_or_copy(&blob, &tmp).map_err(|e| {
+                let e = io::Error::from(e);
+                io::Error::new(e.kind(), format!("reading blob {hash}: {e}"))
+            })?;
             if hash_file(&tmp)? != hash {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -608,34 +606,58 @@ fn temp_name(name: &str) -> String {
     format!(".{name}.{}.{n}.remora-tmp", std::process::id())
 }
 
+/// Why `clone_or_copy` failed: reading the source, or writing the copy.
+enum CopyError {
+    Read(io::Error),
+    Write(io::Error),
+}
+
+impl From<CopyError> for io::Error {
+    fn from(e: CopyError) -> Self {
+        match e {
+            CopyError::Read(e) | CopyError::Write(e) => e,
+        }
+    }
+}
+
 /// Clone `from` to the new file `to` (copy-on-write) where the filesystem can, else copy it
 /// to `to` with `.copy` appended: Windows may still hold the file of a failed clone, pending
 /// deletion, under the first name. Returns the file written and whether it was cloned. Like
 /// every temp file here, both names are created exclusively, so a planted symlink makes this
-/// fail instead of being followed.
-fn clone_or_copy(from: &Path, to: &Path) -> io::Result<(PathBuf, bool)> {
-    match reflink_copy::reflink(from, to) {
-        Ok(()) => {
-            // Flushing needs a handle with write access on Windows. A clone of a read-only
-            // file is read-only too; its data is checked by hash when used, so skip it then.
-            if let Ok(file) = fs::OpenOptions::new().write(true).open(to) {
-                file.sync_all()?;
-            }
-            Ok((to.to_path_buf(), true))
-        }
+/// fail instead of being followed. The file written is made writable by its owner, stamped with
+/// the current time (a clone keeps its source's, which would make it look like a leftover in
+/// `blobs/tmp`) and flushed.
+fn clone_or_copy(from: &Path, to: &Path) -> Result<(PathBuf, bool), CopyError> {
+    let (written, cloned) = match reflink_copy::reflink(from, to) {
+        Ok(()) => (to.to_path_buf(), true),
         // Not ours to remove, and copying would fail the same way.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Err(e),
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(CopyError::Write(e)),
         Err(_) => {
             // No clones here (another filesystem, or one without them): copy instead.
             let _ = fs::remove_file(to);
             let copy = copy_name(to);
-            let mut source = File::open(from)?;
-            let mut target = platform::create_private_file(&copy)?;
-            io::copy(&mut source, &mut target)?;
-            target.sync_all()?;
-            Ok((copy, false))
+            let mut source = File::open(from).map_err(CopyError::Read)?;
+            let mut target = platform::create_private_file(&copy).map_err(CopyError::Write)?;
+            let mut buf = vec![0u8; 64 * 1024];
+            loop {
+                let n = source.read(&mut buf).map_err(CopyError::Read)?;
+                if n == 0 {
+                    break;
+                }
+                target.write_all(&buf[..n]).map_err(CopyError::Write)?;
+            }
+            (copy, false)
         }
-    }
+    };
+    platform::set_private(&written).map_err(CopyError::Write)?;
+    let file = fs::OpenOptions::new()
+        .write(true)
+        .open(&written)
+        .map_err(CopyError::Write)?;
+    file.set_modified(std::time::SystemTime::now())
+        .map_err(CopyError::Write)?;
+    file.sync_all().map_err(CopyError::Write)?;
+    Ok((written, cloned))
 }
 
 /// Where `clone_or_copy` copies when it cannot clone to `to`.
