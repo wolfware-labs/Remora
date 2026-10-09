@@ -264,10 +264,13 @@ fn every_response_has_a_stable_wire_form() {
                 journal_entries: 2,
                 restore_points: 5,
                 last_unprotected: vec![PathBuf::from("/home/me/proj/secret")],
+                blob_store: PathBuf::from("/mnt/work/.remora-store/0123456789abcdef/blobs"),
+                copy_on_write: Some(true),
             },
         },
         json!({"type": "status", "status": {"root": "/home/me/proj", "open_sessions": ["s1"], "journal_entries": 2,
-               "restore_points": 5, "last_unprotected": ["/home/me/proj/secret"]}}),
+               "restore_points": 5, "last_unprotected": ["/home/me/proj/secret"],
+               "blob_store": "/mnt/work/.remora-store/0123456789abcdef/blobs", "copy_on_write": true}}),
     );
     ok(
         Response::Verified {

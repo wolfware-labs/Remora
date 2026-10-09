@@ -31,30 +31,49 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct CopySnapshotter {
     store: PathBuf,
+    /// `<store>/blobs`, or a folder on the project's own volume (see `with_blobs`).
+    blobs: PathBuf,
     opts: SnapOptions,
 }
 
 impl CopySnapshotter {
-    /// Open (or create) a store at `store`.
+    /// Open (or create) a store at `store`, with its blobs in `<store>/blobs`.
     pub fn new(store: impl Into<PathBuf>, opts: SnapOptions) -> Result<Self, SnapError> {
         let store = store.into();
-        for sub in ["blobs", "manifests"] {
-            let dir = store.join(sub);
-            platform::create_private_dir_all(&dir).map_err(io_at(&dir))?;
+        let blobs = store.join("blobs");
+        Self::with_blobs(store, blobs, opts)
+    }
+
+    /// Open (or create) a store at `store` whose blobs live in `blobs`: a folder on the
+    /// project's own volume, so its files can be cloned into it.
+    pub fn with_blobs(
+        store: impl Into<PathBuf>,
+        blobs: impl Into<PathBuf>,
+        opts: SnapOptions,
+    ) -> Result<Self, SnapError> {
+        let (store, blobs) = (store.into(), blobs.into());
+        for dir in [&blobs, &store.join("manifests")] {
+            platform::create_private_dir_all(dir).map_err(io_at(dir))?;
         }
         // A store created before permissions were enforced (or loosened since) is tightened.
-        for dir in [store.clone(), store.join("blobs"), store.join("manifests")] {
+        for dir in [store.clone(), blobs.clone(), store.join("manifests")] {
             platform::tighten_dir(&dir).map_err(io_at(&dir))?;
         }
         let store = store.canonicalize().map_err(io_at(&store))?;
-        let tmp = store.join("blobs").join("tmp");
+        let blobs = blobs.canonicalize().map_err(io_at(&blobs))?;
+        let tmp = blobs.join("tmp");
         platform::create_private_dir_all(&tmp).map_err(io_at(&tmp))?;
         remove_stale_temps(&tmp, STALE_TEMP);
-        Ok(Self { store, opts })
+        Ok(Self { store, blobs, opts })
     }
 
     fn blob_path(&self, hash: &str) -> PathBuf {
-        self.store.join("blobs").join(&hash[..2]).join(&hash[2..])
+        self.blobs.join(&hash[..2]).join(&hash[2..])
+    }
+
+    /// Where this store keeps its blobs.
+    pub fn blobs_dir(&self) -> &Path {
+        &self.blobs
     }
 
     fn manifest_path(&self, id: &SnapshotId) -> PathBuf {
@@ -70,7 +89,7 @@ impl CopySnapshotter {
     fn store_file(&self, abs: &Path) -> Result<Stored, StoreError> {
         // An unreadable or vanished file is the project's problem, not the store's.
         File::open(abs).map_err(StoreError::Source)?;
-        let tmp = self.store.join("blobs").join("tmp").join(temp_name("blob"));
+        let tmp = self.blobs.join("tmp").join(temp_name("blob"));
         let result = (|| {
             let (tmp, cloned) = clone_or_copy(abs, &tmp).map_err(|e| match e {
                 CopyError::Read(e) => StoreError::Source(e),

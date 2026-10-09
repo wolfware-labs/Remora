@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::io_at;
-use crate::{EngineError, Project, fsutil};
+use crate::{EngineError, Project, blob_home, fsutil};
 
 /// The per-OS default data directory: Linux `$XDG_DATA_HOME/remora` or
 /// `~/.local/share/remora`, macOS `~/Library/Application Support/remora`,
@@ -27,6 +27,9 @@ pub fn project_id(canonical_root: &Path) -> String {
 #[derive(Debug, Serialize, Deserialize)]
 struct ProjectFile {
     root: String,
+    /// The project's blob folder on its own volume; absent for the data directory's store.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    blobs: Option<String>,
 }
 
 /// Owns the data directory and the machine's signing key.
@@ -82,21 +85,30 @@ impl Engine {
             Err(e) => return Err(io_at(&file)(e)),
         };
         let root_str = root.to_string_lossy().into_owned();
-        match recorded {
+        let blobs = match recorded {
             Some(p) if p.root != root_str => {
                 return Err(EngineError::ProjectMismatch {
                     id,
                     recorded_root: p.root,
                 });
             }
-            Some(_) => {}
+            // Recorded once: blobs already stored must always be found again.
+            Some(p) => p.blobs.map(PathBuf::from),
             None => {
-                let json =
-                    serde_json::to_vec(&ProjectFile { root: root_str }).expect("project file serializes");
+                let blobs = blob_home::choose(&root, &self.data_dir, &id);
+                let json = serde_json::to_vec(&ProjectFile {
+                    root: root_str,
+                    blobs: blobs.as_ref().map(|b| b.to_string_lossy().into_owned()),
+                })
+                .expect("project file serializes");
                 fsutil::write_private_atomic(&file, &json).map_err(io_at(&file))?;
+                blobs
             }
+        };
+        if let Some(blobs) = &blobs {
+            blob_home::check(blobs, &self.data_dir)?;
         }
-        Project::open(id, root, dir, self.key.clone())
+        Project::open(id, root, dir, blobs, self.key.clone())
     }
 
     /// The canonical project root. A folder that no longer exists (the agent deleted it)

@@ -6,13 +6,17 @@
 //! Data layout under the data directory (everything owner-only):
 //! ```text
 //! signing.key                      the machine's ed25519 key
-//! projects/<id>/project.json       { "root": "<canonical project root>" }
-//! projects/<id>/store/             snapshot store
+//! projects/<id>/project.json       { "root": "<canonical project root>", "blobs": "<folder>"? }
+//! projects/<id>/store/             snapshot store (its blobs, unless "blobs" names another folder)
 //! projects/<id>/journal.db         signed, hash-chained journal
 //! projects/<id>/sessions/<id>.json open turns (survive restarts)
 //! projects/<id>/lock               serializes processes working on the project
 //! ```
+//!
+//! A project on another volume than the data directory keeps its blobs on its own volume,
+//! in `<anchor>/.remora-store/<id>/blobs` (see `blob_home`), so its files can be cloned.
 
+mod blob_home;
 mod engine;
 mod error;
 mod fsutil;

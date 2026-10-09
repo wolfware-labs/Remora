@@ -149,4 +149,4 @@ fn mode(meta: &fs::Metadata) -> u32 {
 }
 
 /// Default exclusions, for `tree_state`.
-pub const EXCLUDED: &[&str] = &["node_modules", "target", ".venv", ".remora"];
+pub const EXCLUDED: &[&str] = &["node_modules", "target", ".venv", ".remora", ".remora-store"];

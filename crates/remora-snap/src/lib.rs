@@ -29,7 +29,7 @@ pub struct SnapOptions {
 impl Default for SnapOptions {
     fn default() -> Self {
         Self {
-            exclude_dirs: ["node_modules", "target", ".venv", ".remora"]
+            exclude_dirs: ["node_modules", "target", ".venv", ".remora", ".remora-store"]
                 .into_iter()
                 .map(String::from)
                 .collect(),

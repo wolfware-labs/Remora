@@ -98,6 +98,13 @@ pub struct Status {
     pub restore_points: usize,
     /// Paths the most recent snapshot by this process could not protect.
     pub last_unprotected: Vec<PathBuf>,
+    /// Where the project's blobs are stored.
+    #[serde(default)]
+    pub blob_store: PathBuf,
+    /// Whether the most recent snapshot by this process that stored files cloned them
+    /// (copy-on-write) or copied them; `None` until one has.
+    #[serde(default)]
+    pub copy_on_write: Option<bool>,
 }
 
 enum Item {
@@ -113,6 +120,7 @@ pub struct Project {
     snap: CopySnapshotter,
     journal: Journal,
     last_unprotected: Vec<PathBuf>,
+    copy_on_write: Option<bool>,
 }
 
 // Hand-written so the signing key inside the journal can never end up in a log.
@@ -130,9 +138,13 @@ impl Project {
         id: String,
         root: PathBuf,
         dir: PathBuf,
+        blobs: Option<PathBuf>,
         key: SigningKey,
     ) -> Result<Self, EngineError> {
-        let snap = CopySnapshotter::new(dir.join("store"), SnapOptions::default())?;
+        let snap = match blobs {
+            Some(blobs) => CopySnapshotter::with_blobs(dir.join("store"), blobs, SnapOptions::default())?,
+            None => CopySnapshotter::new(dir.join("store"), SnapOptions::default())?,
+        };
         let journal = Journal::open(&dir.join("journal.db"), key)?;
         let sessions = dir.join("sessions");
         fsutil::private_dir(&sessions).map_err(io_at(&sessions))?;
@@ -143,6 +155,7 @@ impl Project {
             snap,
             journal,
             last_unprotected: Vec::new(),
+            copy_on_write: None,
         })
     }
 
@@ -169,6 +182,9 @@ impl Project {
             std::fs::create_dir_all(&self.root).map_err(io_at(&self.root))?;
         }
         let s = self.snap.snapshot(&self.root)?;
+        if s.hashed_files > 0 {
+            self.copy_on_write = Some(s.cloned_files > 0);
+        }
         self.last_unprotected = s.unprotected;
         Ok(s.id)
     }
@@ -618,6 +634,8 @@ impl Project {
             journal_entries: self.journal.entries()?.len(),
             restore_points: self.points()?.len(),
             last_unprotected: self.last_unprotected.clone(),
+            blob_store: self.snap.blobs_dir().to_path_buf(),
+            copy_on_write: self.copy_on_write,
         })
     }
 

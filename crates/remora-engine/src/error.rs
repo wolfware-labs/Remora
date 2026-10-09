@@ -41,6 +41,8 @@ pub enum EngineError {
     CorruptState { path: PathBuf, detail: String },
     #[error("no data directory: set one explicitly")]
     NoDataDir,
+    #[error("blob store {path} is unavailable: {reason}")]
+    BlobStoreUnavailable { path: PathBuf, reason: String },
 }
 
 /// Attach a path to an `io::Error`: `fs::read(p).map_err(io_at(p))`.

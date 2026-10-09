@@ -48,6 +48,8 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
                 "journal_entries": status.journal_entries,
                 "restore_points": status.restore_points,
                 "unprotected": status.last_unprotected,
+                "blob_store": status.blob_store,
+                "copy_on_write": status.copy_on_write,
                 "last_snapshot_ms": last_snapshot,
             })
         );
@@ -89,6 +91,12 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
         "journal  {} entries  ·  {} restore points  ·  last snapshot {last}",
         status.journal_entries, status.restore_points
     );
+    let mode = match status.copy_on_write {
+        Some(true) => "copy-on-write",
+        Some(false) => "plain copy",
+        None => "not known until the next snapshot",
+    };
+    println!("store  {}  ({mode})", status.blob_store.display());
     if !status.last_unprotected.is_empty() {
         let names: Vec<_> = status
             .last_unprotected
