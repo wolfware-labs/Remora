@@ -67,7 +67,10 @@ fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
     // On another drive the test makes a folder at that drive's root, which outlives the
     // temporary directories: remove it at the end (also when an assertion fails; declared
     // before the project so its files are closed first), so a second run starts clean.
-    let _cleanup = (drive(engine.data_dir()) != drive(&root)).then(|| RemoveOnDrop(private.clone()));
+    // Never remove a folder that was already there: it may be the user's real store.
+    let existed = private.exists();
+    let _cleanup =
+        (drive(engine.data_dir()) != drive(&root) && !existed).then(|| RemoveOnDrop(private.clone()));
 
     let mut p = engine.project(&root).unwrap();
     p.begin_turn(&agent(), None, 1_000).unwrap();
