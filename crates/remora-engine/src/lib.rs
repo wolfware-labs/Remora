@@ -23,6 +23,7 @@ mod fsutil;
 mod lock;
 mod project;
 mod session;
+mod winuser;
 
 pub use engine::{Engine, default_data_dir, project_id};
 pub use error::EngineError;
@@ -31,3 +32,4 @@ pub use project::{
     Status, short_label,
 };
 pub use session::SessionRef;
+pub use winuser::user_sid;

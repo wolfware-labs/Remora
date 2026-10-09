@@ -492,44 +492,15 @@ fn private_socket_dir(dir: &Path, data_dir: &Path) -> Result<(), DaemonError> {
 #[cfg(windows)]
 fn owner_only() -> io::Result<interprocess::os::windows::security_descriptor::SecurityDescriptor> {
     use interprocess::os::windows::security_descriptor::SecurityDescriptor;
-    let sid = user_sid();
+    // An elevated daemon's pipe owner is the Administrators group: naming the user lets the
+    // same user's non-elevated clients in.
+    let sid = remora_engine::user_sid();
     if sid.is_none() {
         log::warn!("cannot read the user's SID with whoami: the pipe admits its owner only");
     }
     let sddl = widestring::U16CString::from_str(pipe_sddl(sid.as_deref()))
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     SecurityDescriptor::deserialize(&sddl)
-}
-
-/// The SID of the user running this process, from `whoami`. An elevated daemon's pipe owner
-/// is the Administrators group, so naming the user lets the same user's non-elevated
-/// clients in.
-#[cfg(windows)]
-fn user_sid() -> Option<String> {
-    let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
-    let output = std::process::Command::new(Path::new(&root).join(r"System32\whoami.exe"))
-        .args(["/user", "/fo", "csv", "/nh"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    parse_whoami_sid(&String::from_utf8_lossy(&output.stdout))
-}
-
-/// The SID in `whoami /user /fo csv /nh` output (`"host\user","S-1-5-21-…"`).
-#[cfg_attr(not(windows), allow(dead_code))]
-fn parse_whoami_sid(output: &str) -> Option<String> {
-    let field = output.trim().rsplit(',').next()?.trim().trim_matches('"');
-    let valid = field.strip_prefix("S-1-").is_some_and(|rest| {
-        !rest.is_empty()
-            && rest
-                .split('-')
-                .all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
-    });
-    valid.then(|| field.to_owned())
 }
 
 /// The pipe's security descriptor: the user's SID when known, else the pipe's owner (`OW`).
@@ -728,25 +699,6 @@ fn request_id(line: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn the_user_sid_is_read_from_whoami() {
-        let out = "\"desktop-7q2\\o'neil\",\"S-1-5-21-3623811015-3361044348-30300820-1013\"\r\n";
-        assert_eq!(
-            parse_whoami_sid(out).as_deref(),
-            Some("S-1-5-21-3623811015-3361044348-30300820-1013")
-        );
-        for bad in [
-            "",
-            "\"host\\me\"",
-            "\"host\\me\",\"S-1-\"",
-            "\"me\",\"S-1-5-x\"",
-            "\"me\",\"S-1-5-\"",
-            "\"me\",\"S-1-5-21)(A;;GA;;;WD\"",
-        ] {
-            assert_eq!(parse_whoami_sid(bad), None, "{bad}");
-        }
-    }
 
     #[test]
     fn the_pipe_admits_the_user_and_system_only() {
