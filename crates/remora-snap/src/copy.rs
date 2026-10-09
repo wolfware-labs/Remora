@@ -89,26 +89,29 @@ impl CopySnapshotter {
     fn store_file(&self, abs: &Path) -> Result<Stored, StoreError> {
         // An unreadable or vanished file is the project's problem, not the store's.
         File::open(abs).map_err(StoreError::Source)?;
-        let tmp = self.blobs.join("tmp").join(temp_name("blob"));
+        let dir = self.blobs.join("tmp");
+        let (tmp, cloned) = clone_or_copy(abs, &dir, "blob").map_err(|e| match e {
+            CopyError::Read(e) => StoreError::Source(e),
+            CopyError::Write(e) => StoreError::Store(io_at(&dir)(e)),
+        })?;
         let result = (|| {
-            let (tmp, cloned) = clone_or_copy(abs, &tmp).map_err(|e| match e {
-                CopyError::Read(e) => StoreError::Source(e),
-                CopyError::Write(e) => StoreError::Store(io_at(&tmp)(e)),
-            })?;
             let (hash, size) = hash_and_size(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
             let path = self.blob_path(&hash);
             // A blob whose size is wrong (say, truncated by a crash) is replaced.
             if fs::metadata(&path).is_ok_and(|m| m.len() == size) {
                 let _ = fs::remove_file(&tmp);
             } else {
-                let dir = path.parent().expect("blob path has a parent");
-                platform::create_private_dir_all(dir).map_err(|e| StoreError::Store(io_at(dir)(e)))?;
+                let blob_dir = path.parent().expect("blob path has a parent");
+                platform::create_private_dir_all(blob_dir)
+                    .map_err(|e| StoreError::Store(io_at(blob_dir)(e)))?;
+                // Only what becomes a blob is flushed, not the temps discarded as duplicates.
+                sync_file(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
                 fs::rename(&tmp, &path).map_err(|e| StoreError::Store(io_at(&path)(e)))?;
             }
             Ok(Stored { hash, size, cloned })
         })();
         if result.is_err() {
-            remove_temps(&tmp);
+            let _ = fs::remove_file(&tmp);
         }
         result
     }
@@ -122,26 +125,26 @@ impl CopySnapshotter {
             return Ok(Restored::Unchanged);
         }
         let blob = self.blob_path(hash);
-        let tmp = abs.with_file_name(temp_name(
-            abs.file_name().and_then(|n| n.to_str()).unwrap_or("file"),
-        ));
+        let dir = abs.parent().unwrap_or(Path::new("."));
+        let name = abs.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+        let (tmp, cloned) = clone_or_copy(&blob, dir, name).map_err(|e| match e {
+            CopyError::Read(e) => io::Error::new(e.kind(), format!("reading blob {hash}: {e}")),
+            CopyError::Write(e) => io::Error::new(e.kind(), format!("writing {}: {e}", abs.display())),
+        })?;
         let result = (|| {
-            let (tmp, cloned) = clone_or_copy(&blob, &tmp).map_err(|e| {
-                let e = io::Error::from(e);
-                io::Error::new(e.kind(), format!("reading blob {hash}: {e}"))
-            })?;
             if hash_file(&tmp)? != hash {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("blob {hash} is corrupt (its contents do not match its hash)"),
                 ));
             }
+            sync_file(&tmp)?;
             platform::set_mode(&tmp, mode)?;
             fs::rename(&tmp, abs)?;
             Ok(Restored::Written { cloned })
         })();
         if result.is_err() {
-            remove_temps(&tmp);
+            let _ = fs::remove_file(&tmp);
         }
         result
     }
@@ -191,6 +194,7 @@ impl Snapshotter for CopySnapshotter {
             std::path::MAIN_SEPARATOR
         ));
         let mut hashed_files = 0;
+        let mut stored_files = 0;
         let mut cloned_files = 0;
 
         for (rel, entry) in scanned.entries {
@@ -301,6 +305,7 @@ impl Snapshotter for CopySnapshotter {
                                 cloned,
                             }) => {
                                 hashed_files += 1;
+                                stored_files += 1;
                                 cloned_files += usize::from(cloned);
                                 // Only cache what was stored if the file did not change since the scan,
                                 // and never while it is racy (see `statcache`).
@@ -352,6 +357,7 @@ impl Snapshotter for CopySnapshotter {
             id,
             unprotected,
             hashed_files,
+            stored_files,
             cloned_files,
         })
     }
@@ -639,44 +645,74 @@ impl From<CopyError> for io::Error {
     }
 }
 
-/// Clone `from` to the new file `to` (copy-on-write) where the filesystem can, else copy it
-/// to `to` with `.copy` appended: Windows may still hold the file of a failed clone, pending
-/// deletion, under the first name. Returns the file written and whether it was cloned. Like
-/// every temp file here, both names are created exclusively, so a planted symlink makes this
-/// fail instead of being followed. The file written is made writable by its owner, stamped with
-/// the current time (a clone keeps its source's, which would make it look like a leftover in
-/// `blobs/tmp`) and flushed.
-fn clone_or_copy(from: &Path, to: &Path) -> Result<(PathBuf, bool), CopyError> {
-    let (written, cloned) = match reflink_copy::reflink(from, to) {
-        Ok(()) => (to.to_path_buf(), true),
-        // Not ours to remove, and copying would fail the same way.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(CopyError::Write(e)),
-        Err(_) => {
-            // No clones here (another filesystem, or one without them): copy instead.
-            let _ = fs::remove_file(to);
-            let copy = copy_name(to);
-            let mut source = File::open(from).map_err(CopyError::Read)?;
-            let mut target = platform::create_private_file(&copy).map_err(CopyError::Write)?;
-            let mut buf = vec![0u8; 64 * 1024];
-            loop {
-                let n = source.read(&mut buf).map_err(CopyError::Read)?;
-                if n == 0 {
-                    break;
-                }
-                target.write_all(&buf[..n]).map_err(CopyError::Write)?;
+/// How many temp names are tried when one is already taken (a leftover of an earlier process
+/// with the same id, say, as ids repeat in containers).
+const TEMP_ATTEMPTS: usize = 3;
+
+/// Clone `from` to a new temp file in `dir` named after `name` (copy-on-write) where the
+/// filesystem can, else copy it. Returns the file written and whether it was cloned. A temp
+/// name that is already taken is replaced by a fresh one, a few times. The file is created
+/// exclusively, so a planted symlink makes this fail instead of being followed. It is made
+/// writable by its owner and stamped with the current time (a clone keeps its source's, which
+/// would make it look like a leftover in `blobs/tmp`). Callers flush it (`sync_file`) when it
+/// is worth keeping. On failure nothing is left behind.
+fn clone_or_copy(from: &Path, dir: &Path, name: &str) -> Result<(PathBuf, bool), CopyError> {
+    let mut attempt = 1;
+    loop {
+        let tmp = dir.join(temp_name(name));
+        match clone_or_copy_to(from, &tmp) {
+            Err(CopyError::Write(e))
+                if e.kind() == io::ErrorKind::AlreadyExists && attempt < TEMP_ATTEMPTS =>
+            {
+                attempt += 1;
             }
-            (copy, false)
+            Err(e) => return Err(e),
+            Ok(done) => return Ok(done),
         }
-    };
-    platform::set_private(&written).map_err(CopyError::Write)?;
-    let file = fs::OpenOptions::new()
-        .write(true)
-        .open(&written)
-        .map_err(CopyError::Write)?;
-    file.set_modified(std::time::SystemTime::now())
-        .map_err(CopyError::Write)?;
-    file.sync_all().map_err(CopyError::Write)?;
-    Ok((written, cloned))
+    }
+}
+
+/// Clone `from` to the new file `to`, else copy it to `to` with `.copy` appended: Windows may
+/// still hold the file of a failed clone, pending deletion, under the first name.
+fn clone_or_copy_to(from: &Path, to: &Path) -> Result<(PathBuf, bool), CopyError> {
+    let result = (|| {
+        let (written, cloned) = match reflink_copy::reflink(from, to) {
+            Ok(()) => (to.to_path_buf(), true),
+            // Not ours to remove, and copying would fail the same way.
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => return Err(CopyError::Write(e)),
+            Err(_) => {
+                // No clones here (another filesystem, or one without them): copy instead.
+                let _ = fs::remove_file(to);
+                let copy = copy_name(to);
+                let mut source = File::open(from).map_err(CopyError::Read)?;
+                let mut target = platform::create_private_file(&copy).map_err(CopyError::Write)?;
+                let mut buf = vec![0u8; 64 * 1024];
+                loop {
+                    let n = source.read(&mut buf).map_err(CopyError::Read)?;
+                    if n == 0 {
+                        break;
+                    }
+                    target.write_all(&buf[..n]).map_err(CopyError::Write)?;
+                }
+                (copy, false)
+            }
+        };
+        platform::set_private(&written).map_err(CopyError::Write)?;
+        let file = fs::OpenOptions::new()
+            .write(true)
+            .open(&written)
+            .map_err(CopyError::Write)?;
+        file.set_modified(std::time::SystemTime::now())
+            .map_err(CopyError::Write)?;
+        Ok((written, cloned))
+    })();
+    // A name taken by someone else's file is not ours to remove.
+    if let Err(e) = &result
+        && !matches!(e, CopyError::Write(w) if w.kind() == io::ErrorKind::AlreadyExists)
+    {
+        remove_temps(to);
+    }
+    result
 }
 
 /// Where `clone_or_copy` copies when it cannot clone to `to`.
@@ -686,10 +722,15 @@ fn copy_name(to: &Path) -> PathBuf {
     PathBuf::from(name)
 }
 
-/// Remove whatever `clone_or_copy(_, tmp)` may have left.
+/// Remove whatever `clone_or_copy_to(_, tmp)` may have left.
 fn remove_temps(tmp: &Path) {
     let _ = fs::remove_file(tmp);
     let _ = fs::remove_file(copy_name(tmp));
+}
+
+/// Flush a file's data to disk.
+fn sync_file(path: &Path) -> io::Result<()> {
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()
 }
 
 /// The SHA-256 of a file and how many bytes it has.

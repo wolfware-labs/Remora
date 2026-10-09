@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::error::io_at;
+use crate::lock::ProjectLock;
 use crate::{EngineError, Project, blob_home, fsutil};
 
 /// The per-OS default data directory: Linux `$XDG_DATA_HOME/remora` or
@@ -74,35 +75,28 @@ impl Engine {
         fsutil::private_dir(&dir).map_err(io_at(&dir))?;
 
         let file = dir.join("project.json");
-        let recorded = match fs::read(&file) {
-            Ok(bytes) => Some(serde_json::from_slice::<ProjectFile>(&bytes).map_err(|e| {
-                EngineError::CorruptState {
-                    path: file.clone(),
-                    detail: e.to_string(),
-                }
-            })?),
-            Err(e) if e.kind() == io::ErrorKind::NotFound => None,
-            Err(e) => return Err(io_at(&file)(e)),
-        };
         let root_str = root.to_string_lossy().into_owned();
-        let blobs = match recorded {
-            Some(p) if p.root != root_str => {
-                return Err(EngineError::ProjectMismatch {
-                    id,
-                    recorded_root: p.root,
-                });
-            }
+        let blobs = match read_project_file(&file)? {
             // Recorded once: blobs already stored must always be found again.
-            Some(p) => p.blobs.map(PathBuf::from),
+            Some(p) => recorded_blobs(p, &root_str, &id)?,
             None => {
-                let blobs = blob_home::choose(&root, &self.data_dir, &id);
-                let json = serde_json::to_vec(&ProjectFile {
-                    root: root_str,
-                    blobs: blobs.as_ref().map(|b| b.to_string_lossy().into_owned()),
-                })
-                .expect("project file serializes");
-                fsutil::write_private_atomic(&file, &json).map_err(io_at(&file))?;
-                blobs
+                // Choosing a blob home creates a folder on the project's volume: two processes
+                // opening new projects there at once must not both try, and a later one must
+                // see what the first recorded.
+                let _lock = ProjectLock::acquire(&self.data_dir.join("blob-home.lock"))?;
+                match read_project_file(&file)? {
+                    Some(p) => recorded_blobs(p, &root_str, &id)?,
+                    None => {
+                        let blobs = blob_home::choose(&root, &self.data_dir, &id);
+                        let json = serde_json::to_vec(&ProjectFile {
+                            root: root_str,
+                            blobs: blobs.as_ref().map(|b| b.to_string_lossy().into_owned()),
+                        })
+                        .expect("project file serializes");
+                        fsutil::write_private_atomic(&file, &json).map_err(io_at(&file))?;
+                        blobs
+                    }
+                }
             }
         };
         if let Some(blobs) = &blobs {
@@ -149,6 +143,32 @@ impl Engine {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ProjectFile>(&bytes).ok())
             .is_some_and(|recorded| Path::new(&recorded.root) == root)
+    }
+}
+
+/// The recorded project file, if there is one.
+fn read_project_file(file: &Path) -> Result<Option<ProjectFile>, EngineError> {
+    match fs::read(file) {
+        Ok(bytes) => serde_json::from_slice::<ProjectFile>(&bytes)
+            .map(Some)
+            .map_err(|e| EngineError::CorruptState {
+                path: file.to_path_buf(),
+                detail: e.to_string(),
+            }),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(io_at(file)(e)),
+    }
+}
+
+/// The blob folder a project file records, if it is for the project rooted at `root`.
+fn recorded_blobs(recorded: ProjectFile, root: &str, id: &str) -> Result<Option<PathBuf>, EngineError> {
+    if recorded.root == root {
+        Ok(recorded.blobs.map(PathBuf::from))
+    } else {
+        Err(EngineError::ProjectMismatch {
+            id: id.to_owned(),
+            recorded_root: recorded.root,
+        })
     }
 }
 

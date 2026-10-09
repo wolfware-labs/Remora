@@ -80,7 +80,7 @@ pub fn expect_clones() -> Option<bool> {
 pub fn check_snapshot_clones(snapshot: &Snapshot) {
     match expect_clones() {
         Some(true) => assert_eq!(
-            snapshot.cloned_files, snapshot.hashed_files,
+            snapshot.cloned_files, snapshot.stored_files,
             "every stored file should have been cloned"
         ),
         Some(false) => assert_eq!(snapshot.cloned_files, 0, "nothing should have been cloned"),

@@ -182,7 +182,7 @@ impl Project {
             std::fs::create_dir_all(&self.root).map_err(io_at(&self.root))?;
         }
         let s = self.snap.snapshot(&self.root)?;
-        if s.hashed_files > 0 {
+        if s.stored_files > 0 {
             self.copy_on_write = Some(s.cloned_files > 0);
         }
         self.last_unprotected = s.unprotected;

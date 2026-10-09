@@ -9,6 +9,7 @@
 //!
 //! The private folder (`.remora-store` on Unix, `.remora-store-<user SID>` at the drive's root on Windows) is owner-only:
 //! mode 0700 on Unix; on Windows owned by the user, with an `icacls` access list of the user and SYSTEM alone, re-applied at every open.
+//! It holds a `.gitignore` with `*`, so a git repository around it does not list it.
 
 use std::ffi::OsString;
 use std::fs;
@@ -87,18 +88,41 @@ fn open_to_others(mode: u32) -> bool {
     mode & 0o022 != 0 && mode & 0o1000 == 0
 }
 
+/// Whether a folder owned by `uid` with `mode` can be trusted to stay in place for `owner`
+/// (like ssh's StrictModes): no other user may rename what is inside it, and it belongs to
+/// `owner` or to root.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn safe_ancestor(mode: u32, uid: u32, owner: u32) -> bool {
+    !open_to_others(mode) && (uid == owner || uid == 0)
+}
+
+impl Ancestor {
+    #[cfg_attr(not(unix), allow(dead_code))]
+    fn is_safe(&self, owner: u32) -> bool {
+        safe_ancestor(self.mode, self.owner, owner)
+    }
+}
+
 /// The anchor for a project on `volume`: the highest of `ancestors` (the project's parent
-/// first, then upward) still on that volume and owned by `owner`. Never the project root
-/// itself, so the store is never inside the project. A folder other users may write in
-/// without the sticky bit is skipped: they could replace `.remora-store` in it.
+/// first, then upward to `/`, across volumes) still on that volume and owned by `owner`.
+/// Never the project root itself, so the store is never inside the project. Every ancestor
+/// above the anchor must be safe (see `safe_ancestor`): otherwise another user could rename
+/// the anchor away and put their own folder in its place. The search stops looking upward at
+/// the first unsafe ancestor.
 #[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) fn pick_anchor(ancestors: &[Ancestor], volume: u64, owner: u32) -> Option<PathBuf> {
+    // Only ancestors from `trusted` upward have a safe chain above them.
+    let trusted = ancestors
+        .iter()
+        .rposition(|a| !a.is_safe(owner))
+        .map_or(0, |unsafe_at| unsafe_at + 1);
     ancestors
         .iter()
-        .take_while(|a| a.volume == volume)
-        .filter(|a| a.owner == owner && !open_to_others(a.mode))
+        .enumerate()
+        .take_while(|(_, a)| a.volume == volume)
+        .filter(|(i, a)| *i >= trusted && a.owner == owner && !open_to_others(a.mode))
         .last()
-        .map(|a| a.path.clone())
+        .map(|(_, a)| a.path.clone())
 }
 
 /// The blob folder for a new project rooted at `root` (canonical): `None` when the project
@@ -115,12 +139,20 @@ pub(crate) fn choose(root: &Path, data_dir: &Path, id: &str) -> Option<PathBuf> 
             return None;
         }
     };
+    // project.json records the folder as a string. The rest of the path is ASCII.
+    if anchor.to_str().is_none() {
+        log::warn!(
+            "the blob store folder on the volume of {} is not valid UTF-8, the blobs stay in the data directory",
+            root.display()
+        );
+        return None;
+    }
     match prepare(&anchor, id, owner, data_dir) {
         Ok(blobs) => Some(blobs),
         Err(e) => {
             log::warn!(
-                "cannot use {} for the blobs of {}, they stay in the data directory: {e}",
-                anchor.join(STORE_DIR).display(),
+                "cannot use a private folder in {} for the blobs of {}, they stay in the data directory: {e}",
+                anchor.display(),
                 root.display()
             );
             None
@@ -129,8 +161,9 @@ pub(crate) fn choose(root: &Path, data_dir: &Path, id: &str) -> Option<PathBuf> 
 }
 
 /// Check a recorded blob folder before use: it must exist (a missing one means its volume is
-/// not mounted, and switching to another would lose the blobs already there) and its
-/// `.remora-store` must still be private to the data directory's owner.
+/// not mounted, and switching to another would lose the blobs already there) and its private
+/// folder (`.remora-store` on Unix, this user's `.remora-store-<SID>` on Windows) must still
+/// be private to the user.
 pub(crate) fn check(blobs: &Path, data_dir: &Path) -> Result<(), EngineError> {
     let unavailable = |reason: String| EngineError::BlobStoreUnavailable {
         path: blobs.to_path_buf(),
@@ -149,8 +182,8 @@ pub(crate) fn check(blobs: &Path, data_dir: &Path) -> Result<(), EngineError> {
     recheck_private(private, blobs, data_dir).map_err(unavailable)
 }
 
-/// Unix: `.remora-store`, owned by the data directory's owner, closed to others, in an
-/// anchor other users may not write in.
+/// Unix: `.remora-store`, owned by the data directory's owner, closed to others, in a chain of
+/// folders up to `/` that other users may not change (see `safe_ancestor`).
 #[cfg(not(windows))]
 fn recheck_private(private: &Path, _blobs: &Path, data_dir: &Path) -> Result<(), String> {
     if private.file_name() != Some(std::ffi::OsStr::new(STORE_DIR)) {
@@ -158,13 +191,13 @@ fn recheck_private(private: &Path, _blobs: &Path, data_dir: &Path) -> Result<(),
     }
     let owner = owner_of(data_dir).map_err(|e| e.to_string())?;
     check_private(private, owner).map_err(|e| e.to_string())?;
-    // Another user able to rename `.remora-store` in its anchor could redirect the blobs.
+    // Another user able to rename `.remora-store`, or a folder above it, could redirect the blobs.
     #[cfg(unix)]
-    if let Some(anchor) = private.parent() {
+    for dir in private.ancestors().skip(1) {
         use std::os::unix::fs::MetadataExt;
-        let mode = fs::metadata(anchor).map_err(|e| e.to_string())?.mode();
-        if open_to_others(mode) {
-            return Err(format!("{} can be changed by other users", anchor.display()));
+        let meta = fs::metadata(dir).map_err(|e| e.to_string())?;
+        if !safe_ancestor(meta.mode(), meta.uid(), owner) {
+            return Err(format!("{} can be changed by other users", dir.display()));
         }
     }
     Ok(())
@@ -193,15 +226,47 @@ fn recheck_private(private: &Path, blobs: &Path, _data_dir: &Path) -> Result<(),
 #[cfg(not(windows))]
 fn prepare(anchor: &Path, id: &str, owner: u32, _data_dir: &Path) -> io::Result<PathBuf> {
     let store_dir = anchor.join(STORE_DIR);
-    match create_private(&store_dir) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+    let created = match create_private(&store_dir) {
+        Ok(()) => true,
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(e),
-    }
-    check_private(&store_dir, owner)?;
+    };
     let blobs = store_dir.join(id).join("blobs");
-    fsutil::private_dir(&blobs)?;
-    Ok(blobs)
+    let result = (|| {
+        check_private(&store_dir, owner)?;
+        ensure_gitignore(&store_dir, created)?;
+        fsutil::private_dir(&blobs)
+    })();
+    match result {
+        Ok(()) => Ok(blobs),
+        Err(e) => {
+            if created {
+                remove_created(&store_dir, id);
+            }
+            Err(e)
+        }
+    }
+}
+
+/// Put a `.gitignore` with `*` in the private folder, unless it has one: a git repository
+/// around it would list it otherwise. For a folder made by an earlier version it is best effort.
+fn ensure_gitignore(private: &Path, required: bool) -> io::Result<()> {
+    let file = private.join(".gitignore");
+    if fs::symlink_metadata(&file).is_ok() {
+        return Ok(());
+    }
+    let written = crate::fsutil::write_private_atomic(&file, b"*\n");
+    if required { written } else { Ok(()) }
+}
+
+/// Remove the private folder this call made, after a later step failed, so a stray one does
+/// not refuse every later project. Only what Remora made and only if empty: nothing else goes.
+fn remove_created(private: &Path, id: &str) {
+    let id_dir = private.join(id);
+    let _ = fs::remove_dir(id_dir.join("blobs"));
+    let _ = fs::remove_dir(&id_dir);
+    let _ = fs::remove_file(private.join(".gitignore"));
+    let _ = fs::remove_dir(private);
 }
 
 /// Create `<drive>:\.remora-store-<SID>` (or reuse it when Remora made it for this user
@@ -212,8 +277,8 @@ fn prepare(anchor: &Path, id: &str, _owner: u32, data_dir: &Path) -> io::Result<
     // At the drive's root, not inside a shared folder: other users may not rename what is
     // in the root unless they own it.
     let private = anchor.join(private_name(&sid));
-    match fs::create_dir(&private) {
-        Ok(()) => {}
+    let created = match fs::create_dir(&private) {
+        Ok(()) => true,
         // Someone else's folder could hold their entries, junctions or open handles.
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists && !recorded_under(data_dir, &private) => {
             return Err(io::Error::new(
@@ -224,23 +289,35 @@ fn prepare(anchor: &Path, id: &str, _owner: u32, data_dir: &Path) -> io::Result<
                 ),
             ));
         }
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => false,
         Err(e) => return Err(e),
-    }
-    check_private(&private, 0)?;
-    run_icacls(&icacls_steps(&private, &sid))?;
-    verify_acl(&private, &sid)?;
+    };
     let id_dir = private.join(id);
     let blobs = id_dir.join("blobs");
-    for dir in [&id_dir, &blobs] {
-        match fs::create_dir(dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e),
+    let result = (|| {
+        check_private(&private, 0)?;
+        run_icacls(&icacls_steps(&private, &sid))?;
+        verify_acl(&private, &sid)?;
+        ensure_gitignore(&private, created)?;
+        for dir in [&id_dir, &blobs] {
+            match fs::create_dir(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            check_private(dir, 0)?;
         }
-        check_private(dir, 0)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(blobs),
+        Err(e) => {
+            if created {
+                remove_created(&private, id);
+            }
+            Err(e)
+        }
     }
-    Ok(blobs)
 }
 
 /// Run each `icacls` step, failing on the first that fails.
@@ -349,18 +426,27 @@ fn anchor(root: &Path, data_dir: &Path) -> io::Result<Option<(PathBuf, u32)>> {
     if data.dev() == volume {
         return Ok(None);
     }
-    let ancestors: Vec<Ancestor> = root
-        .ancestors()
-        .skip(1)
-        .map_while(|path| {
-            fs::metadata(path).ok().map(|m| Ancestor {
+    // All the way up to `/`: an ancestor that cannot be read counts as unsafe and ends the list.
+    let mut ancestors = Vec::new();
+    for path in root.ancestors().skip(1) {
+        match fs::metadata(path) {
+            Ok(m) => ancestors.push(Ancestor {
                 path: path.to_path_buf(),
                 volume: m.dev(),
                 owner: m.uid(),
                 mode: m.mode(),
-            })
-        })
-        .collect();
+            }),
+            Err(_) => {
+                ancestors.push(Ancestor {
+                    path: path.to_path_buf(),
+                    volume: u64::MAX,
+                    owner: u32::MAX,
+                    mode: 0o777,
+                });
+                break;
+            }
+        }
+    }
     Ok(pick_anchor(&ancestors, volume, data.uid()).map(|anchor| (anchor, data.uid())))
 }
 
@@ -507,14 +593,80 @@ mod tests {
             ..at("/mnt/work", 2, 1000)
         };
         let mine = at("/mnt/work/me", 2, 1000);
+        let top = at("/", 1, 0);
+        // The open folder itself is skipped, and being above `mine` it makes `mine` unsafe too.
         assert_eq!(
-            pick_anchor(&[mine.clone(), open], 2, 1000),
-            Some(PathBuf::from("/mnt/work/me"))
+            pick_anchor(&[mine.clone(), open.clone(), top.clone()], 2, 1000),
+            None
         );
         assert_eq!(
-            pick_anchor(&[mine, sticky], 2, 1000),
-            Some(PathBuf::from("/mnt/work"))
+            pick_anchor(&[mine, sticky, top], 2, 1000),
+            Some(PathBuf::from("/mnt/work")),
+            "the sticky bit keeps others from renaming"
         );
+    }
+
+    #[test]
+    fn every_ancestor_above_the_anchor_must_be_safe() {
+        // /a is open to others, so they can rename /a/b away.
+        let open_above = [
+            at("/a/b", 2, 1000),
+            Ancestor {
+                mode: 0o777,
+                ..at("/a", 2, 1000)
+            },
+            at("/", 1, 0),
+        ];
+        assert_eq!(pick_anchor(&open_above, 2, 1000), None);
+        // Owned by another, non-root user.
+        let foreign = [at("/a/b", 2, 1000), at("/a", 2, 1001), at("/", 1, 0)];
+        assert_eq!(pick_anchor(&foreign, 2, 1000), None);
+        // An unsafe ancestor far above a mount still counts.
+        let far = [
+            at("/srv/data", 2, 1000),
+            at("/srv", 1, 0),
+            Ancestor {
+                mode: 0o775,
+                ..at("/", 1, 0)
+            },
+        ];
+        assert_eq!(pick_anchor(&far, 2, 1000), None);
+        // A root-owned 0755 chain above an owned mount is fine.
+        let mount = [
+            at("/mnt/work/me", 2, 1000),
+            at("/mnt/work", 2, 1000),
+            at("/mnt", 1, 0),
+            at("/", 1, 0),
+        ];
+        assert_eq!(pick_anchor(&mount, 2, 1000), Some(PathBuf::from("/mnt/work")));
+        // A sticky 1777 ancestor above (like /tmp) is fine too.
+        let sticky_above = [
+            at("/tmp/mnt", 2, 1000),
+            Ancestor {
+                mode: 0o1777,
+                ..at("/tmp", 1, 0)
+            },
+            at("/", 1, 0),
+        ];
+        assert_eq!(
+            pick_anchor(&sticky_above, 2, 1000),
+            Some(PathBuf::from("/tmp/mnt"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[allow(clippy::unwrap_used)]
+    fn a_new_store_folder_ignores_itself_in_git() {
+        let anchor = tempfile::TempDir::new().unwrap();
+        let owner = owner_of(anchor.path()).unwrap();
+        let blobs = prepare(anchor.path(), "0123456789abcdef", owner, anchor.path()).unwrap();
+        let store_dir = anchor.path().join(STORE_DIR);
+        assert_eq!(fs::read_to_string(store_dir.join(".gitignore")).unwrap(), "*\n");
+        assert!(blobs.is_dir());
+        // A second project in the same folder keeps it, and the folder still checks out.
+        prepare(anchor.path(), "fedcba9876543210", owner, anchor.path()).unwrap();
+        check_private(&store_dir, owner).unwrap();
     }
 
     #[cfg(unix)]

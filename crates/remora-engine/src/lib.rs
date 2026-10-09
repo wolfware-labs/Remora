@@ -11,10 +11,12 @@
 //! projects/<id>/journal.db         signed, hash-chained journal
 //! projects/<id>/sessions/<id>.json open turns (survive restarts)
 //! projects/<id>/lock               serializes processes working on the project
+//! blob-home.lock                   serializes choosing the blob folder of new projects
 //! ```
 //!
 //! A project on another volume than the data directory keeps its blobs on its own volume,
-//! in `<anchor>/.remora-store/<id>/blobs` (see `blob_home`), so its files can be cloned.
+//! in `<anchor>/.remora-store/<id>/blobs` (Unix) or `<drive>:\.remora-store-<user SID>\<id>\blobs`
+//! (Windows), see `blob_home`, so its files can be cloned.
 
 mod blob_home;
 mod engine;

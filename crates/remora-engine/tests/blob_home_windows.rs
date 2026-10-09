@@ -39,6 +39,15 @@ fn saved_sddl(dir: &Path) -> String {
     }
 }
 
+/// Removes the folder when dropped.
+struct RemoveOnDrop(std::path::PathBuf);
+
+impl Drop for RemoveOnDrop {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
 #[test]
 fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
     // The data directory on the system drive; the project on the drive under test (CI's
@@ -48,6 +57,17 @@ fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
     fs::write(project.path().join("a.txt"), "a").unwrap();
     let engine = Engine::open(data.path()).unwrap();
     let root = project.path().canonicalize().unwrap();
+
+    let sid = user_sid().expect("whoami reports the user's SID");
+    let private = root
+        .ancestors()
+        .last()
+        .unwrap()
+        .join(format!(".remora-store-{sid}"));
+    // On another drive the test makes a folder at that drive's root, which outlives the
+    // temporary directories: remove it at the end (also when an assertion fails; declared
+    // before the project so its files are closed first), so a second run starts clean.
+    let _cleanup = (drive(engine.data_dir()) != drive(&root)).then(|| RemoveOnDrop(private.clone()));
 
     let mut p = engine.project(&root).unwrap();
     p.begin_turn(&agent(), None, 1_000).unwrap();
@@ -61,12 +81,6 @@ fn a_project_on_another_drive_keeps_its_blobs_on_that_drive() {
         );
         return;
     }
-    let sid = user_sid().expect("whoami reports the user's SID");
-    let private = root
-        .ancestors()
-        .last()
-        .unwrap()
-        .join(format!(".remora-store-{sid}"));
     let expected = private.join(project_id(&root)).join("blobs");
     if status.blob_store != expected {
         panic!(
