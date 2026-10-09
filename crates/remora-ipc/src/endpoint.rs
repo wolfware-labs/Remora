@@ -60,6 +60,18 @@ fn owner_uid(_data_dir: &Path) -> u32 {
     0
 }
 
+/// Whether `dir`, holding a socket outside the data directory, is safe: a real folder (not a
+/// symlink), owned by the owner of `data_dir`, closed to everyone else. The daemon refuses
+/// to listen in an unsafe one and clients refuse to connect through it.
+#[cfg(unix)]
+pub fn socket_dir_is_private(dir: &Path, data_dir: &Path) -> io::Result<bool> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = std::fs::metadata(data_dir)?.uid();
+    // Not followed: a link could point anywhere.
+    let meta = std::fs::symlink_metadata(dir)?;
+    Ok(meta.is_dir() && meta.uid() == owner && meta.mode() & 0o077 == 0)
+}
+
 fn short_hash(data_dir: &Path) -> String {
     use sha2::{Digest, Sha256};
     let digest = Sha256::digest(data_dir.to_string_lossy().as_bytes());

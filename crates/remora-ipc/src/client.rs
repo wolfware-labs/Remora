@@ -32,8 +32,12 @@ pub enum ClientError {
     Protocol(String),
     /// What answered on the daemon's endpoint could not prove it knows the secret: it is not
     /// this user's daemon. Nothing but the challenge was sent to it.
-    #[error("something other than your Remora daemon answers on its endpoint")]
-    Impostor,
+    #[error("something other than your Remora daemon answers on {endpoint}")]
+    Impostor { endpoint: String },
+    /// The folder holding the daemon's socket is someone else's or open to others: nothing
+    /// is sent through it.
+    #[error("unsafe socket directory {}: it must be yours and closed to other users", .0.display())]
+    UnsafeSocketDir(std::path::PathBuf),
     /// The daemon answered with an error.
     #[error(transparent)]
     Daemon(ErrorBody),
@@ -85,20 +89,34 @@ impl Client {
         // No secret means no daemon has started for this data directory (or this user cannot
         // read it).
         let secret = Secret::load(data_dir).map_err(|_| ClientError::DaemonNotRunning)?;
-        let stream = connect_stream(data_dir, timeout)?;
+        match Self::open_with(data_dir, timeout, &secret) {
+            // The daemon may have restarted, with a new secret, since this one was read: one
+            // more try with the new one.
+            Err(ClientError::Impostor { .. })
+                if Secret::load(data_dir).is_ok_and(|current| current != secret) =>
+            {
+                let current = Secret::load(data_dir).map_err(|_| ClientError::DaemonNotRunning)?;
+                Self::open_with(data_dir, timeout, &current)
+            }
+            opened => opened,
+        }
+    }
+
+    fn open_with(data_dir: &Path, timeout: Duration, secret: &Secret) -> Result<(Self, u32), ClientError> {
+        let (stream, endpoint) = connect_stream(data_dir, timeout)?;
         let mut client = Self {
             conn: Some(BufReader::new(stream)),
             next_id: 1,
             timeout,
             daemon_version: String::new(),
         };
-        let protocol = client.authenticate(&secret)?;
+        let protocol = client.authenticate(secret, &endpoint)?;
         Ok((client, protocol))
     }
 
     /// The handshake: the daemon proves it knows the secret before anything else is sent,
     /// then the client proves it does. Returns the daemon's protocol.
-    fn authenticate(&mut self, secret: &Secret) -> Result<u32, ClientError> {
+    fn authenticate(&mut self, secret: &Secret, endpoint: &str) -> Result<u32, ClientError> {
         let nonce = auth::nonce()?;
         let hello = Request::Hello {
             client_version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -114,7 +132,9 @@ impl Client {
             } => {
                 if !secret.verify_server(&nonce, &proof) {
                     self.conn = None;
-                    return Err(ClientError::Impostor);
+                    return Err(ClientError::Impostor {
+                        endpoint: endpoint.to_owned(),
+                    });
                 }
                 self.daemon_version = daemon_version;
                 (protocol, server_nonce)
@@ -195,12 +215,24 @@ fn exchange(
 }
 
 /// Connect to the endpoint of the daemon that owns `data_dir`, waiting at most `timeout`.
-fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientError> {
+/// Returns the stream and the endpoint, for messages.
+fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<(Stream, String), ClientError> {
     let data_dir = data_dir
         .canonicalize()
         .map_err(|_| ClientError::DaemonNotRunning)?;
     let endpoint = endpoint(&data_dir);
-    ConnectOptions::new()
+    #[cfg(unix)]
+    if let crate::Endpoint::Socket(path) = &endpoint
+        && let Some(dir) = path.parent().filter(|dir| *dir != data_dir)
+    {
+        match crate::socket_dir_is_private(dir, &data_dir) {
+            Ok(true) => {}
+            Ok(false) => return Err(ClientError::UnsafeSocketDir(dir.to_path_buf())),
+            // No folder, no daemon.
+            Err(_) => return Err(ClientError::DaemonNotRunning),
+        }
+    }
+    let stream = ConnectOptions::new()
         .name(endpoint.name()?)
         .wait_mode(ConnectWaitMode::Timeout(timeout))
         .connect_sync()
@@ -208,7 +240,8 @@ fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientEr
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => ClientError::DaemonNotRunning,
             io::ErrorKind::TimedOut | io::ErrorKind::WouldBlock => ClientError::Timeout(timeout),
             _ => ClientError::Io(e),
-        })
+        })?;
+    Ok((stream, endpoint.to_string()))
 }
 
 /// Stop the daemon that owns `data_dir` and wait up
@@ -216,18 +249,32 @@ fn connect_stream(data_dir: &Path, timeout: Duration) -> Result<Stream, ClientEr
 /// (`remorad.lock`) released, so a replacement can start at once. `Ok(false)` if no daemon
 /// was running.
 ///
-/// A daemon from before authentication (no `remorad.secret` in the data directory) is not
-/// stopped and is reported as `Ok(false)`.
+/// A daemon from before authentication writes no `remorad.secret`: if one answers anyway, it
+/// gets the bare `{"v":1,"id":0,"req":{"type":"shutdown"}}` such daemons accept, which
+/// carries nothing secret.
 pub fn stop_daemon(data_dir: &Path, timeout: Duration) -> Result<bool, ClientError> {
     let deadline = Instant::now() + timeout;
-    let mut client = match Client::open(data_dir, timeout) {
-        Ok((client, _protocol)) => client,
-        Err(ClientError::DaemonNotRunning) => return Ok(false),
+    match Client::open(data_dir, timeout) {
+        Ok((mut client, _protocol)) => {
+            // The daemon stops once it has read the request, whether or not the answer arrives.
+            let _ = client.call(Request::Shutdown);
+        }
+        // A secret, but nothing listening: no daemon.
+        Err(ClientError::DaemonNotRunning) if Secret::load(data_dir).is_ok() => return Ok(false),
+        Err(ClientError::DaemonNotRunning) => match connect_stream(data_dir, timeout) {
+            Ok((mut stream, _)) => {
+                let shutdown = RequestEnvelope {
+                    v: 1,
+                    id: 0,
+                    req: Request::Shutdown,
+                };
+                let _ = write_frame(&mut stream, &shutdown);
+            }
+            Err(ClientError::DaemonNotRunning) => return Ok(false),
+            Err(e) => return Err(e),
+        },
         Err(e) => return Err(e),
-    };
-    // The daemon stops once it has read the request, whether or not the answer arrives.
-    let _ = client.call(Request::Shutdown);
-    drop(client);
+    }
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         let gone = matches!(

@@ -463,7 +463,7 @@ fn listen(endpoint: &Endpoint) -> Result<Listener, DaemonError> {
 /// closed to others (creating it so), as the data directory is.
 #[cfg(unix)]
 fn private_socket_dir(dir: &Path, data_dir: &Path) -> Result<(), DaemonError> {
-    use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+    use std::os::unix::fs::DirBuilderExt;
     let io_error = |source| DaemonError::Io {
         path: dir.to_path_buf(),
         source,
@@ -473,18 +473,11 @@ fn private_socket_dir(dir: &Path, data_dir: &Path) -> Result<(), DaemonError> {
         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
         Err(e) => return Err(io_error(e)),
     }
-    let owner = fs::metadata(data_dir)
-        .map_err(|source| DaemonError::Io {
-            path: data_dir.to_path_buf(),
-            source,
-        })?
-        .uid();
-    // Not followed: a link could point anywhere.
-    let meta = fs::symlink_metadata(dir).map_err(io_error)?;
-    if !meta.is_dir() || meta.uid() != owner || meta.mode() & 0o077 != 0 {
-        return Err(DaemonError::UnsafeSocketDir(dir.to_path_buf()));
+    match remora_ipc::socket_dir_is_private(dir, data_dir) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(DaemonError::UnsafeSocketDir(dir.to_path_buf())),
+        Err(e) => Err(io_error(e)),
     }
-    Ok(())
 }
 
 /// A protected DACL granting access to the user running the daemon and SYSTEM only.

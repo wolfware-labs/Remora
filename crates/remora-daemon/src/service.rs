@@ -296,11 +296,17 @@ mod platform {
         Ok(format!(r"removed logon entry {RUN_KEY}\{RUN_VALUE}"))
     }
 
+    /// How long starting the daemon may take.
+    const START_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
     /// Start `exe run` with no console window, outliving this process.
     fn start_detached(exe: &Path) -> Result<(), ServiceError> {
-        crate::spawn_detached(exe, &["run"], &std::env::temp_dir()).map_err(|source| ServiceError::Io {
-            path: exe.to_path_buf(),
-            source,
+        let args = [std::ffi::OsStr::new("run")];
+        crate::spawn_detached(exe, &args, &std::env::temp_dir(), START_LIMIT).map_err(|source| {
+            ServiceError::Io {
+                path: exe.to_path_buf(),
+                source,
+            }
         })
     }
 }

@@ -4,6 +4,7 @@
 //! `<data_dir>/hook.log`; when it means a session is not being recorded, Claude Code shows a
 //! warning once per session and reason. The process always exits 0.
 
+use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -219,9 +220,16 @@ fn describe(error: &ClientError) -> (&'static str, String) {
         ),
         ClientError::Daemon(body) => ("daemon-error", body.message.clone()),
         ClientError::Protocol(detail) => ("protocol", detail.clone()),
-        ClientError::Impostor => (
+        ClientError::Impostor { endpoint } => (
             "impostor",
-            "something other than your Remora daemon answers on its endpoint".to_owned(),
+            format!("something other than your Remora daemon answers on {endpoint}"),
+        ),
+        ClientError::UnsafeSocketDir(dir) => (
+            "unsafe-socket-dir",
+            format!(
+                "the folder of the daemon's socket, {}, is not yours alone",
+                dir.display()
+            ),
         ),
     }
 }
@@ -248,7 +256,11 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         if Instant::now() >= deadline {
             break;
         }
-        start_daemon(remora, &env.data_dir)?;
+        start_daemon(
+            remora,
+            &env.data_dir,
+            deadline.saturating_duration_since(Instant::now()),
+        )?;
         let started_by = (Instant::now() + env.start_wait).min(deadline);
         loop {
             match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
@@ -263,16 +275,21 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
     Err(ClientError::DaemonNotRunning)
 }
 
-/// Start `remora daemon` for `data_dir`, detached so it outlives this hook.
-fn start_daemon(remora: &Path, data_dir: &Path) -> Result<(), ClientError> {
+/// Start `remora daemon` for `data_dir`, detached so it outlives this hook, taking at most
+/// `limit` to do so.
+fn start_daemon(remora: &Path, data_dir: &Path, limit: Duration) -> Result<(), ClientError> {
     // Not the agent's folder, which the agent may delete.
     let cwd = if data_dir.is_dir() {
         data_dir.to_path_buf()
     } else {
         std::env::temp_dir()
     };
-    let data_dir = data_dir.to_string_lossy();
-    remora_daemon::spawn_detached(remora, &["--data-dir", &data_dir, "daemon"], &cwd).map_err(ClientError::Io)
+    let args = [
+        OsStr::new("--data-dir"),
+        data_dir.as_os_str(),
+        OsStr::new("daemon"),
+    ];
+    remora_daemon::spawn_detached(remora, &args, &cwd, limit).map_err(ClientError::Io)
 }
 
 /// Small files under the data directory, one per session (and reason).

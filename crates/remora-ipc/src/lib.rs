@@ -21,6 +21,8 @@ mod framing;
 mod protocol;
 
 pub use client::{Client, ClientError, DEFAULT_TIMEOUT, stop_daemon};
+#[cfg(unix)]
+pub use endpoint::socket_dir_is_private;
 pub use endpoint::{Endpoint, MAX_SOCKET_PATH, endpoint};
 pub use framing::{FrameError, read_frame, write_frame};
 pub use protocol::{
