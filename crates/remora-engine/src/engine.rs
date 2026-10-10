@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 
 use crate::error::io_at;
 use crate::lock::ProjectLock;
-use crate::{EngineError, Project, blob_home, fsutil};
+use crate::{EngineError, Project, blob_home, fsutil, session};
 
 /// The per-OS default data directory: Linux `$XDG_DATA_HOME/remora` or
 /// `~/.local/share/remora`, macOS `~/Library/Application Support/remora`,
@@ -132,6 +132,51 @@ impl Engine {
         }
     }
 
+    /// Remove everything Remora holds for the project at `root`: its blob folder on the
+    /// project's volume, then its data folder (journal, snapshots, sessions). Refused while
+    /// a turn is open, unless `force`. The project must not be open in this process.
+    pub fn forget(&self, root: &Path, force: bool) -> Result<Forgotten, EngineError> {
+        // A deleted project folder is still forgotten by the path it had.
+        let root = root
+            .canonicalize()
+            .ok()
+            .or_else(|| canonical_prefix(root))
+            .unwrap_or_else(|| root.to_path_buf());
+        let id = project_id(&root);
+        let dir = self.data_dir.join("projects").join(&id);
+        let recorded = read_project_file(&dir.join("project.json"))?
+            .ok_or_else(|| EngineError::UnknownProject(root.clone()))?;
+        if Path::new(&recorded.root) != root {
+            return Err(EngineError::ProjectMismatch {
+                id,
+                recorded_root: recorded.root,
+            });
+        }
+        if !force {
+            let _lock = ProjectLock::acquire(&dir.join("lock"))?;
+            if let Some(open) = session::load_all(&dir.join("sessions"))?.first() {
+                return Err(EngineError::TurnInProgress {
+                    session: open.session_id.clone(),
+                });
+            }
+        }
+        // `<home>/<id>/blobs`: the folder named after the project goes, never more.
+        let blob_home = recorded
+            .blobs
+            .map(PathBuf::from)
+            .and_then(|blobs| blobs.parent().map(Path::to_path_buf))
+            .filter(|home| home.file_name().is_some_and(|name| name == id.as_str()));
+        // The data folder goes last: if anything fails, forgetting again finds the project.
+        if let Some(home) = &blob_home {
+            remove_all(home)?;
+        }
+        remove_all(&dir)?;
+        Ok(Forgotten {
+            data_dir: dir,
+            blob_home,
+        })
+    }
+
     /// The roots of every project recorded in the data directory. Unreadable project
     /// files are skipped.
     pub fn project_roots(&self) -> Result<Vec<PathBuf>, EngineError> {
@@ -158,6 +203,24 @@ impl Engine {
             .ok()
             .and_then(|bytes| serde_json::from_slice::<ProjectFile>(&bytes).ok())
             .is_some_and(|recorded| Path::new(&recorded.root) == root)
+    }
+}
+
+/// What [`Engine::forget`] removed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Forgotten {
+    pub data_dir: PathBuf,
+    /// The project's blob folder on its own volume, if it had one.
+    pub blob_home: Option<PathBuf>,
+}
+
+/// Remove a folder and everything in it (symlinks are removed, never followed); one
+/// that is already gone is fine.
+fn remove_all(dir: &Path) -> Result<(), EngineError> {
+    match fs::remove_dir_all(dir) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(io_at(dir)(e)),
     }
 }
 

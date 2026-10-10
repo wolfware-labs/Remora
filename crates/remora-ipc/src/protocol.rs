@@ -142,6 +142,13 @@ pub enum Request {
     Verify {
         root: PathBuf,
     },
+    /// Remove everything recorded for the project. Refused while a turn is open, unless
+    /// `force`.
+    Forget {
+        root: PathBuf,
+        #[serde(default)]
+        force: bool,
+    },
     /// Apply the retention policy to the project now; with `dry_run`, only report.
     Prune {
         root: PathBuf,
@@ -195,6 +202,12 @@ pub enum Response {
     },
     Pruned {
         report: PruneReport,
+    },
+    /// What `forget` removed.
+    Forgotten {
+        data_dir: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blob_home: Option<PathBuf>,
     },
     ShuttingDown,
 }

@@ -30,7 +30,7 @@ mod retention;
 mod session;
 mod winuser;
 
-pub use engine::{Engine, default_data_dir, project_id};
+pub use engine::{Engine, Forgotten, default_data_dir, project_id};
 pub use error::EngineError;
 pub use project::{
     MAX_LABEL_BYTES, PointKind, Preview, Project, REMORA_AGENT, REWIND_FILE, REWIND_SESSION,

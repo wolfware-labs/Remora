@@ -146,6 +146,13 @@ fn every_request_has_a_stable_wire_form() {
         json!({"type": "verify", "root": "/home/me/proj"}),
     );
     request(
+        Request::Forget {
+            root: root(),
+            force: true,
+        },
+        json!({"type": "forget", "root": "/home/me/proj", "force": true}),
+    );
+    request(
         Request::Prune {
             root: root(),
             dry_run: true,
@@ -299,6 +306,14 @@ fn every_response_has_a_stable_wire_form() {
                "blob_store": "/mnt/work/.remora-store/0123456789abcdef/blobs", "copy_on_write": true,
                "retention": {"days": 30, "max_store_gb": 10},
                "config_problem": "config.toml: unknown field `dayz`"}}),
+    );
+    ok(
+        Response::Forgotten {
+            data_dir: PathBuf::from("/home/me/.local/share/remora/projects/0123456789abcdef"),
+            blob_home: Some(PathBuf::from("/mnt/work/.remora-store/0123456789abcdef")),
+        },
+        json!({"type": "forgotten", "data_dir": "/home/me/.local/share/remora/projects/0123456789abcdef",
+               "blob_home": "/mnt/work/.remora-store/0123456789abcdef"}),
     );
     ok(
         Response::Pruned {

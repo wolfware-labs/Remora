@@ -1,6 +1,7 @@
 //! The `remora` commands people run. Each prints its result and returns a [`CliError`]
 //! carrying the exit code on failure.
 
+pub mod forget;
 pub mod log;
 pub mod prune;
 pub mod rewind;

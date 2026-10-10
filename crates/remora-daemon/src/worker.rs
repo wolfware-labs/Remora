@@ -62,6 +62,10 @@ pub(crate) enum Job {
     Prune {
         dry_run: bool,
     },
+    /// Close the project and remove everything recorded for it.
+    Forget {
+        force: bool,
+    },
 }
 
 pub(crate) type Reply = Result<Response, ErrorBody>;
@@ -124,6 +128,15 @@ impl Open {
 impl State {
     pub(crate) fn context(&self) -> Arc<Context> {
         Arc::clone(&self.ctx)
+    }
+
+    pub(crate) fn root(&self) -> &std::path::Path {
+        &self.root
+    }
+
+    /// Close the project, if open (the next job opens it again).
+    pub(crate) fn close(&mut self) {
+        self.open = None;
     }
 
     /// The open project, opening it first if needed. Opening closes turns that went stale

@@ -77,6 +77,17 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Remove everything Remora recorded for this project: journal, restore points, stored files
+    Forget {
+        #[command(flatten)]
+        project: Project,
+        /// Do not ask for confirmation
+        #[arg(long, short = 'y')]
+        yes: bool,
+        /// Forget even though an agent is still working in the project
+        #[arg(long)]
+        force: bool,
+    },
     /// Remove restore points the retention policy no longer keeps (see `remora status`)
     Prune {
         #[command(flatten)]
@@ -203,6 +214,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             commands::rewind::run(&ctx, &root(&project)?, &target, yes, force)
         }
         Command::Verify { project, json } => commands::verify::run(&ctx, &root(&project)?, json),
+        Command::Forget { project, yes, force } => commands::forget::run(&ctx, &root(&project)?, yes, force),
         Command::Prune { project, dry_run } => commands::prune::run(&ctx, &root(&project)?, dry_run),
         Command::Service { action } => match action {
             ServiceAction::Install => {

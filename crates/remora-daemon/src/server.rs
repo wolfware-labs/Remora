@@ -396,6 +396,7 @@ impl Shared {
             Request::Status { root } => self.run(&root, Job::Status),
             Request::Verify { root } => self.run(&root, Job::Verify),
             Request::Prune { root, dry_run } => self.run(&root, Job::Prune { dry_run }),
+            Request::Forget { root, force } => self.run(&root, Job::Forget { force }),
         }
     }
 

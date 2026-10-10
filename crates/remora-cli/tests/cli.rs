@@ -170,6 +170,26 @@ fn prune_reports_what_it_would_remove() {
 }
 
 #[test]
+fn forget_removes_the_project_and_needs_yes_off_a_terminal() {
+    let s = Setup::new();
+    s.hook(&prompt(s.repo.path(), "hi"));
+
+    let busy = s.remora(&["forget", "--yes"]);
+    assert_eq!(busy.status.code(), Some(3), "{}", stderr(&busy));
+    assert!(stderr(&busy).contains("--force"), "{}", stderr(&busy));
+    s.hook(&stop(s.repo.path()));
+    let unconfirmed = s.remora(&["forget"]);
+    assert_eq!(unconfirmed.status.code(), Some(2), "{}", stderr(&unconfirmed));
+
+    let out = s.remora(&["forget", "--yes"]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    assert!(stdout(&out).contains("forgot"), "{}", stdout(&out));
+    let log = stdout(&s.remora(&["log"]));
+    assert!(log.contains("no restore points yet"), "{log}");
+}
+
+#[test]
 fn commands_without_a_daemon_say_so_with_exit_code_4() {
     let s = Setup::new();
 

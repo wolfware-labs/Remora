@@ -19,6 +19,8 @@ pub enum EngineError {
     ProjectMismatch { id: String, recorded_root: String },
     #[error("a turn is still in progress in session {session}; stop the agent first")]
     TurnInProgress { session: String },
+    #[error("Remora has nothing recorded for {}", .0.display())]
+    UnknownProject(PathBuf),
     #[error("{0} is not a restore point of this project")]
     UnknownRestorePoint(String),
     #[error("this restore point was pruned on {}: its files are no longer stored", crate::utc_date(*pruned_at_ms))]

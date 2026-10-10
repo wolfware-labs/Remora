@@ -11,6 +11,18 @@ use crate::worker::{Job, Reply, State};
 
 pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
     let ctx = state.context();
+    // Forgetting never opens the project: its files must not be in use when they go.
+    if let Job::Forget { force } = job {
+        state.close();
+        return ctx
+            .engine
+            .forget(state.root(), force)
+            .map(|forgotten| Response::Forgotten {
+                data_dir: forgotten.data_dir,
+                blob_home: forgotten.blob_home,
+            })
+            .map_err(engine_error);
+    }
     let open = state.open().map_err(engine_error)?;
     let result = match job {
         Job::BeginTurn {
@@ -113,6 +125,7 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             status.config_problem.clone_from(&ctx.config.problem);
             Response::Status { status }
         }),
+        Job::Forget { .. } => unreachable!("handled before the project is opened"),
         Job::Prune { dry_run } => {
             let now = open.now_ms();
             open.project

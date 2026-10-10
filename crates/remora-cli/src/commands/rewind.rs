@@ -119,7 +119,7 @@ fn agent_works(client: &mut Client, root: &Path) -> Result<bool, CliError> {
 
 /// The refusal while a turn is open: which sessions, and what to do. Claude Code sends no
 /// end event when the user interrupts it, so an interrupted agent still looks busy.
-fn busy(client: &mut Client, root: &Path) -> CliError {
+pub(super) fn busy(client: &mut Client, root: &Path) -> CliError {
     let mut message = String::from("an agent is still working in this project:\n");
     let now = now_ms();
     let points = points_page(client, root, 0, remora_ipc::MAX_POINTS)
@@ -237,7 +237,7 @@ fn print_rewound(rewound: &Rewound) {
     );
 }
 
-fn confirm() -> Result<bool, CliError> {
+pub(super) fn confirm() -> Result<bool, CliError> {
     print!("Proceed? [y/N] ");
     std::io::stdout()
         .flush()
