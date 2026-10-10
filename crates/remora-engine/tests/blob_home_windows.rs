@@ -137,6 +137,7 @@ fn a_store_folder_left_by_a_crash_is_adopted_and_anything_else_refused() {
     let root = project.path().canonicalize().unwrap();
     let first = TempDir::new().unwrap();
     if drive(Engine::open(first.path()).unwrap().data_dir()) == drive(&root) {
+        eprintln!("skipped: the data directory and the project are on the same drive");
         return;
     }
     let sid = user_sid().unwrap();
@@ -224,6 +225,7 @@ fn a_project_folder_in_the_store_opened_to_others_is_refused() {
     let root = project.path().canonicalize().unwrap();
     let engine = Engine::open(data.path()).unwrap();
     if drive(engine.data_dir()) == drive(&root) {
+        eprintln!("skipped: the data directory and the project are on the same drive");
         return;
     }
     let sid = user_sid().unwrap();

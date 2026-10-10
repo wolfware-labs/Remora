@@ -174,22 +174,33 @@ mod tests {
     }
 }
 
-/// Remove every extended attribute of `path` (macOS; elsewhere a no-op: there clones and
-/// copies carry none Remora needs to clear).
+/// Remove every extended attribute of `path` it can (macOS; elsewhere a no-op: there clones and
+/// copies carry none Remora needs to clear). Best effort: some attributes cannot be removed by a
+/// user process (`com.apple.macl` under SIP, `com.apple.provenance`) and some filesystems have none,
+/// and the blob's contents are right either way, so a failure is logged once and never fails a
+/// snapshot.
 #[cfg(target_os = "macos")]
-pub(crate) fn clear_xattrs(path: &Path) -> io::Result<()> {
-    for name in xattr::list(path)? {
-        match xattr::remove(path, &name) {
-            Ok(()) => {}
-            // Gone in between (some are maintained by the system).
-            Err(e) if e.raw_os_error() == Some(93) => {} // ENOATTR
-            Err(e) => return Err(e),
+pub(crate) fn clear_xattrs(path: &Path) {
+    let mut first_error = None;
+    match xattr::list(path) {
+        Ok(names) => {
+            for name in names {
+                match xattr::remove(path, &name) {
+                    Ok(()) => {}
+                    // Gone in between (some are maintained by the system).
+                    Err(e) if e.raw_os_error() == Some(93) => {} // ENOATTR
+                    Err(e) => {
+                        first_error.get_or_insert(e);
+                    }
+                }
+            }
         }
+        Err(e) => first_error = Some(e),
     }
-    Ok(())
+    if let Some(e) = first_error {
+        log::warn!("{}: could not clear its extended attributes: {e}", path.display());
+    }
 }
 
 #[cfg(not(target_os = "macos"))]
-pub(crate) fn clear_xattrs(_path: &Path) -> io::Result<()> {
-    Ok(())
-}
+pub(crate) fn clear_xattrs(_path: &Path) {}

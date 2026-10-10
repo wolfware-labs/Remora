@@ -107,7 +107,7 @@ impl CopySnapshotter {
                     .map_err(|e| StoreError::Store(io_at(blob_dir)(e)))?;
                 // A clone keeps the file's extended attributes (macOS quarantine flags, Finder
                 // tags): a blob holds contents alone.
-                platform::clear_xattrs(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
+                platform::clear_xattrs(&tmp);
                 // Only what becomes a blob is flushed, not the temps discarded as duplicates.
                 sync_file(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
                 fs::rename(&tmp, &path).map_err(|e| StoreError::Store(io_at(&path)(e)))?;
