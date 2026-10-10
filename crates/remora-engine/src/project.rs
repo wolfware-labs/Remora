@@ -116,6 +116,10 @@ pub struct Status {
     /// Why the configuration file was not used, if it was not.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_problem: Option<String>,
+    /// Why the project's files are copied, not cloned, when a folder above it is the reason
+    /// it has no blob folder on its own volume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plain_copies_because: Option<String>,
 }
 
 enum Item {
@@ -137,6 +141,9 @@ pub struct Project {
     notice: Option<String>,
     /// Snapshots removed by retention (see `retention`).
     pruned: Pruned,
+    /// Why a project on another volume keeps its blobs in the data directory (see
+    /// `blob_home::plain_copy_reason`).
+    pub(crate) plain_copies_because: Option<String>,
 }
 
 /// `rewind.json`: written before a rewind changes anything, removed once it is journaled.
@@ -194,6 +201,7 @@ impl Project {
             copy_on_write: None,
             notice: None,
             pruned,
+            plain_copies_because: None,
         };
         project.recover_interrupted_rewind()?;
         Ok(project)
@@ -898,6 +906,7 @@ impl Project {
             copy_on_write: self.copy_on_write,
             retention: None,
             config_problem: None,
+            plain_copies_because: self.plain_copies_because.clone(),
         })
     }
 

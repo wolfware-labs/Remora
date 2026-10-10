@@ -19,10 +19,16 @@ thiserror.workspace = true
 walkdir.workspace = true
 reflink-copy.workspace = true
 
+[target.'cfg(target_os = "macos")'.dependencies]
+xattr.workspace = true
+
 [dev-dependencies]
 tempfile.workspace = true
 proptest.workspace = true
 walkdir.workspace = true
+
+[target.'cfg(target_os = "macos")'.dev-dependencies]
+xattr.workspace = true
 
 [lints]
 workspace = true

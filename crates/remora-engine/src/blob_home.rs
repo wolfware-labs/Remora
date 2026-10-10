@@ -53,6 +53,30 @@ fn only_user_and_system(sddl: &str, sid: &str) -> bool {
             .all(|t| *t == sid || *t == "SY" || *t == "S-1-5-18" || (built_in_administrator && *t == "LA"))
 }
 
+/// The owner a security descriptor's SDDL names (`O:<sid>`), if any.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn sddl_owner(sddl: &str) -> Option<&str> {
+    let rest = sddl.trim().strip_prefix("O:")?;
+    let end = ["G:", "D:", "S:"]
+        .iter()
+        .filter_map(|mark| rest.find(mark))
+        .min()
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
+/// Whether a `.remora-store-<SID>` that no recorded project uses may be adopted: a crash
+/// after Remora made and secured it, before the first project was recorded, leaves it owned
+/// by the user, open to the user and SYSTEM alone, holding at most its `.gitignore`.
+/// Anything else may be another user's doing and stays refused.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn adoptable(sddl: &str, sid: &str, entries: &[String]) -> bool {
+    let built_in_administrator = sid.ends_with("-500");
+    let owned =
+        sddl_owner(sddl).is_some_and(|owner| owner == sid || (built_in_administrator && owner == "LA"));
+    owned && only_user_and_system(sddl, sid) && entries.iter().all(|entry| entry == ".gitignore")
+}
+
 /// Whether a project recorded in `data_dir` keeps its blobs under `private`: then Remora made
 /// that folder for this user earlier, and it may be used again.
 #[cfg_attr(not(windows), allow(dead_code))]
@@ -212,12 +236,22 @@ fn recheck_private(private: &Path, blobs: &Path, _data_dir: &Path) -> Result<(),
     if private.file_name() != Some(std::ffi::OsStr::new(&name)) {
         return Err(format!("it is not inside your {name} folder"));
     }
-    for dir in [private, blobs.parent().unwrap_or(blobs), blobs] {
+    let id_dir = blobs.parent().unwrap_or(blobs);
+    for dir in [private, id_dir, blobs] {
         check_private(dir, 0).map_err(|e| e.to_string())?;
     }
     run_icacls(&icacls_steps(private, &sid))
         .and_then(|()| verify_acl(private, &sid))
-        .map_err(|e| e.to_string())
+        .map_err(|e| e.to_string())?;
+    // The project's own folders: the user's, with nothing but what they inherit from the
+    // private folder (a folder made again after it vanished must not keep someone else's entries).
+    for dir in [id_dir, blobs] {
+        let [owner, ..] = icacls_steps(dir, &sid);
+        run_icacls(&[owner])
+            .and_then(|()| verify_acl(dir, &sid))
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
 }
 
 /// Create (or reuse) `<anchor>/.remora-store/<id>/blobs`, refusing a `.remora-store` that
@@ -280,7 +314,11 @@ fn prepare(anchor: &Path, id: &str, _owner: u32, data_dir: &Path) -> io::Result<
     let created = match fs::create_dir(&private) {
         Ok(()) => true,
         // Someone else's folder could hold their entries, junctions or open handles.
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists && !recorded_under(data_dir, &private) => {
+        Err(e)
+            if e.kind() == io::ErrorKind::AlreadyExists
+                && !recorded_under(data_dir, &private)
+                && !left_by_a_crash(&private, &sid) =>
+        {
             return Err(io::Error::new(
                 io::ErrorKind::PermissionDenied,
                 format!(
@@ -318,6 +356,61 @@ fn prepare(anchor: &Path, id: &str, _owner: u32, data_dir: &Path) -> io::Result<
             Err(e)
         }
     }
+}
+
+/// Whether `private`, unknown to every recorded project, is one a crash left (see `adoptable`).
+#[cfg(windows)]
+fn left_by_a_crash(private: &Path, sid: &str) -> bool {
+    if check_private(private, 0).is_err() {
+        return false;
+    }
+    let Ok(entries) = fs::read_dir(private) else {
+        return false;
+    };
+    let entries: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    match full_sddl(private) {
+        Ok(sddl) => adoptable(&sddl, sid, &entries),
+        Err(e) => {
+            log::warn!("cannot read the owner of {}: {e}", private.display());
+            false
+        }
+    }
+}
+
+/// `dir`'s owner and access list (the owner is what `icacls /save` leaves out) as SDDL, read
+/// through .NET from Windows PowerShell. No PowerShell module is loaded, and the
+/// `PSModulePath` of a PowerShell 7 parent is dropped: Windows PowerShell cannot load the
+/// modules it points to.
+#[cfg(windows)]
+fn full_sddl(dir: &Path) -> io::Result<String> {
+    let system_root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+    let path = without_verbatim_prefix(dir).to_string_lossy().replace('\'', "''");
+    let out = std::process::Command::new(
+        Path::new(&system_root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"),
+    )
+    .args([
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        &format!(
+            "[System.IO.Directory]::GetAccessControl('{path}').GetSecurityDescriptorSddlForm('Owner, Access')"
+        ),
+    ])
+    .env_remove("PSModulePath")
+    .stdin(std::process::Stdio::null())
+    .output()?;
+    let sddl = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if !out.status.success() || sddl.is_empty() {
+        return Err(io::Error::other(format!(
+            "reading the security descriptor failed ({}): {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(sddl)
 }
 
 /// Run each `icacls` step, failing on the first that fails.
@@ -426,7 +519,54 @@ fn anchor(root: &Path, data_dir: &Path) -> io::Result<Option<(PathBuf, u32)>> {
     if data.dev() == volume {
         return Ok(None);
     }
-    // All the way up to `/`: an ancestor that cannot be read counts as unsafe and ends the list.
+    let ancestors = ancestors_of(root);
+    Ok(pick_anchor(&ancestors, volume, data.uid()).map(|anchor| (anchor, data.uid())))
+}
+
+/// Why a project on another volume than `data_dir` has no blob folder on its own volume
+/// (so its files are copied, not cloned), when a folder above it is the reason: `None` on
+/// the data directory's volume or when a blob folder can be chosen there.
+#[cfg(unix)]
+pub(crate) fn plain_copy_reason(root: &Path, data_dir: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let volume = fs::metadata(root).ok()?.dev();
+    let data = fs::metadata(data_dir).ok()?;
+    if data.dev() == volume {
+        return None;
+    }
+    why_not_anchored(&ancestors_of(root), volume, data.uid())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn plain_copy_reason(_root: &Path, _data_dir: &Path) -> Option<String> {
+    None
+}
+
+/// For `pick_anchor` finding nothing: the folder that stops it, in words.
+#[cfg_attr(not(unix), allow(dead_code))]
+fn why_not_anchored(ancestors: &[Ancestor], volume: u64, owner: u32) -> Option<String> {
+    if pick_anchor(ancestors, volume, owner).is_some() {
+        return None;
+    }
+    let reason = match ancestors.iter().find(|a| !a.is_safe(owner)) {
+        Some(a) if open_to_others(a.mode) => format!(
+            "{} is writable by its group or others, so Remora keeps no store under it",
+            a.path.display()
+        ),
+        Some(a) => format!(
+            "{} belongs to another user, so Remora keeps no store under it",
+            a.path.display()
+        ),
+        None => "no folder above the project on its volume belongs to you".to_owned(),
+    };
+    Some(reason)
+}
+
+/// The folders above `root`, its parent first, all the way up to `/`. One that cannot be
+/// read counts as unsafe and ends the list.
+#[cfg(unix)]
+fn ancestors_of(root: &Path) -> Vec<Ancestor> {
+    use std::os::unix::fs::MetadataExt;
     let mut ancestors = Vec::new();
     for path in root.ancestors().skip(1) {
         match fs::metadata(path) {
@@ -447,7 +587,7 @@ fn anchor(root: &Path, data_dir: &Path) -> io::Result<Option<(PathBuf, u32)>> {
             }
         }
     }
-    Ok(pick_anchor(&ancestors, volume, data.uid()).map(|anchor| (anchor, data.uid())))
+    ancestors
 }
 
 /// On Windows, a project on another drive than `data_dir` is anchored at its drive's root.
@@ -604,6 +744,31 @@ mod tests {
             Some(PathBuf::from("/mnt/work")),
             "the sticky bit keeps others from renaming"
         );
+    }
+
+    #[test]
+    fn why_files_are_copied_names_the_folder_that_stops_the_store() {
+        let shared = Ancestor {
+            mode: 0o775,
+            ..at("/mnt/shared", 2, 1000)
+        };
+        let mine = at("/mnt/shared/me", 2, 1000);
+        let top = at("/", 1, 0);
+        let reason = why_not_anchored(&[mine.clone(), shared, top.clone()], 2, 1000).unwrap();
+        assert!(
+            reason.contains("/mnt/shared is writable by its group or others"),
+            "{reason}"
+        );
+
+        let theirs = at("/mnt/team", 2, 1001);
+        let reason = why_not_anchored(&[mine.clone(), theirs, top.clone()], 2, 1000).unwrap();
+        assert!(reason.contains("/mnt/team belongs to another user"), "{reason}");
+
+        let roots = at("/mnt/data", 2, 0);
+        let reason = why_not_anchored(&[roots, top.clone()], 2, 1000).unwrap();
+        assert!(reason.contains("no folder above the project"), "{reason}");
+
+        assert_eq!(why_not_anchored(&[mine, at("/mnt", 2, 0), top], 2, 1000), None);
     }
 
     #[test]
@@ -770,6 +935,37 @@ mod tests {
             "LA is not another RID's alias"
         );
         assert!(!only_user_and_system("garbage", me));
+    }
+
+    #[test]
+    fn only_a_store_folder_a_crash_left_for_the_user_is_adopted() {
+        let sid = "S-1-5-21-1-2-3-1013";
+        let private = format!("O:{sid}G:{sid}D:PAI(A;OICI;FA;;;{sid})(A;OICI;FA;;;SY)");
+        let gitignore = vec![".gitignore".to_owned()];
+        assert_eq!(sddl_owner(&private), Some(sid));
+        assert!(adoptable(&private, sid, &gitignore));
+        assert!(adoptable(&private, sid, &[]), "a crash before the .gitignore");
+        assert!(
+            !adoptable(
+                &private,
+                sid,
+                &[".gitignore".to_owned(), "0123456789abcdef".to_owned()]
+            ),
+            "something in it"
+        );
+        let theirs = private.replacen(&format!("O:{sid}"), "O:S-1-5-21-1-2-3-1014", 1);
+        assert!(!adoptable(&theirs, sid, &gitignore), "someone else's");
+        let admins = private.replacen(&format!("O:{sid}"), "O:BA", 1);
+        assert!(!adoptable(&admins, sid, &gitignore), "owned by Administrators");
+        let open = format!("{private}(A;OICI;FA;;;WD)");
+        assert!(!adoptable(&open, sid, &gitignore), "open to Everyone");
+        assert!(!adoptable("D:PAI(A;OICI;FA;;;SY)", sid, &gitignore), "no owner");
+        let admin = "S-1-5-21-1-2-3-500";
+        assert!(adoptable(
+            "O:LAG:LAD:PAI(A;OICI;FA;;;LA)(A;OICI;FA;;;SY)",
+            admin,
+            &gitignore
+        ));
     }
 
     #[test]

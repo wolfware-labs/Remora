@@ -299,6 +299,7 @@ fn every_response_has_a_stable_wire_form() {
                     max_store_gb: 10,
                 }),
                 config_problem: Some("config.toml: unknown field `dayz`".into()),
+                plain_copies_because: None,
             },
         },
         json!({"type": "status", "status": {"root": "/home/me/proj", "open_sessions": ["s1"], "journal_entries": 2,

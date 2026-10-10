@@ -102,7 +102,13 @@ impl Engine {
         if let Some(blobs) = &blobs {
             blob_home::check(blobs, &self.data_dir)?;
         }
-        Project::open(id, root, dir, blobs, self.key.clone())
+        let plain_copies_because = match &blobs {
+            None => blob_home::plain_copy_reason(&root, &self.data_dir),
+            Some(_) => None,
+        };
+        let mut project = Project::open(id, root, dir, blobs, self.key.clone())?;
+        project.plain_copies_because = plain_copies_because;
+        Ok(project)
     }
 
     /// The canonical project root. A folder that no longer exists (the agent deleted it)

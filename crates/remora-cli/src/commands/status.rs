@@ -53,6 +53,7 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
                 "last_snapshot_ms": last_snapshot,
                 "retention": status.retention,
                 "config_problem": status.config_problem,
+                "plain_copies_because": status.plain_copies_because,
             })
         );
         return Ok(());
@@ -99,6 +100,9 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
         None => "not known until the next snapshot",
     };
     println!("store  {}  ({mode})", status.blob_store.display());
+    if let Some(reason) = &status.plain_copies_because {
+        println!("  files are copied, not cloned: {reason}");
+    }
     if let Some(retention) = status.retention {
         println!(
             "retention  {} days  ·  {} GB per project  (`remora prune` applies it now)",

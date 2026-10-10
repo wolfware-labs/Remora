@@ -173,3 +173,23 @@ mod tests {
         assert_eq!(fs::read_to_string(&victim).unwrap(), "untouched");
     }
 }
+
+/// Remove every extended attribute of `path` (macOS; elsewhere a no-op: there clones and
+/// copies carry none Remora needs to clear).
+#[cfg(target_os = "macos")]
+pub(crate) fn clear_xattrs(path: &Path) -> io::Result<()> {
+    for name in xattr::list(path)? {
+        match xattr::remove(path, &name) {
+            Ok(()) => {}
+            // Gone in between (some are maintained by the system).
+            Err(e) if e.raw_os_error() == Some(93) => {} // ENOATTR
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+pub(crate) fn clear_xattrs(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
