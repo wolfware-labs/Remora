@@ -62,6 +62,9 @@ pub(crate) enum Job {
     Prune {
         dry_run: bool,
     },
+    /// Like `Prune`, for the janitor: skipped, without opening, when the project is no
+    /// longer recorded (it was forgotten after the janitor listed it).
+    JanitorPrune,
     /// Close the project and remove everything recorded for it.
     Forget {
         force: bool,
@@ -132,6 +135,10 @@ impl State {
 
     pub(crate) fn root(&self) -> &std::path::Path {
         &self.root
+    }
+
+    pub(crate) fn is_open(&self) -> bool {
+        self.open.is_some()
     }
 
     /// Close the project, if open (the next job opens it again).

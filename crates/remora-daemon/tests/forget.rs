@@ -56,3 +56,42 @@ fn forget_is_refused_while_a_turn_is_open() {
         "nothing removed, the project still works"
     );
 }
+
+fn forgotten_daemon() -> (TestDaemon, std::path::PathBuf) {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.write("a.txt", "a");
+    d.begin(&mut client, "s1", Some("edit"));
+    d.end(&mut client, "s1");
+    let dir = d
+        .data
+        .path()
+        .join("projects")
+        .join(project_id(&d.root().canonicalize().unwrap()));
+    client
+        .call(Request::Forget {
+            root: d.root(),
+            force: false,
+        })
+        .unwrap();
+    assert!(!dir.exists());
+    (d, dir)
+}
+
+#[test]
+fn the_sweep_does_not_bring_a_forgotten_project_back() {
+    let (d, dir) = forgotten_daemon();
+
+    d.daemon.sweep();
+
+    assert!(!dir.exists());
+}
+
+#[test]
+fn the_daily_prune_does_not_bring_a_forgotten_project_back() {
+    let (d, dir) = forgotten_daemon();
+
+    d.daemon.prune_if_due();
+
+    assert!(!dir.exists());
+}

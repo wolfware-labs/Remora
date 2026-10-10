@@ -23,6 +23,25 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             })
             .map_err(engine_error);
     }
+    // A project that is not open has no stale turns to close (opening closes them), and
+    // opening one that was forgotten would bring it back.
+    if matches!(job, Job::Sweep) && !state.is_open() {
+        return Ok(Response::Recorded);
+    }
+    let job = if matches!(job, Job::JanitorPrune) {
+        let recorded = ctx
+            .engine
+            .project_roots()
+            .map_err(engine_error)?
+            .iter()
+            .any(|root| root == state.root());
+        if !recorded {
+            return Ok(Response::Recorded);
+        }
+        Job::Prune { dry_run: false }
+    } else {
+        job
+    };
     let open = state.open().map_err(engine_error)?;
     let result = match job {
         Job::BeginTurn {
@@ -126,6 +145,7 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             Response::Status { status }
         }),
         Job::Forget { .. } => unreachable!("handled before the project is opened"),
+        Job::JanitorPrune => unreachable!("turned into a prune above"),
         Job::Prune { dry_run } => {
             let now = open.now_ms();
             open.project

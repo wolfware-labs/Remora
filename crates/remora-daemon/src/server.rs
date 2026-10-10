@@ -304,7 +304,7 @@ impl Shared {
             if !root.is_dir() || self.is_stopping() {
                 continue;
             }
-            match self.run(&root, Job::Prune { dry_run: false }) {
+            match self.run(&root, Job::JanitorPrune) {
                 Ok(Response::Pruned { report }) if !report.pruned.is_empty() => log::info!(
                     "pruned {} restore points of {}, freed {} bytes",
                     report.pruned.len(),
