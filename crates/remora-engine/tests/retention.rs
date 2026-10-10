@@ -253,3 +253,46 @@ fn a_pruned_tree_stored_again_is_restorable_again() {
             .is_none()
     );
 }
+
+#[test]
+fn a_young_snapshot_no_point_uses_is_not_pruned_for_size() {
+    // Such as the safety snapshot of a rewind whose journal write failed: its id was handed
+    // to the user, who must still be able to restore it.
+    let fx = Fixture::new();
+    let since_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    let now = i64::try_from(since_epoch.as_millis()).unwrap();
+    fx.write("a.txt", "old");
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("edit"), now - 10 * DAY_MS).unwrap();
+    // The turn's end state: a manifest written just now that no restore point uses.
+    fx.write("a.txt", "unused");
+    p.end_turn(&agent(), now - 10 * DAY_MS + 1_000).unwrap();
+    fx.write("a.txt", "new");
+    p.begin_turn(&agent(), Some("newest"), now - 9 * DAY_MS).unwrap();
+    p.end_turn(&agent(), now - 9 * DAY_MS + 1_000).unwrap();
+    assert_eq!(manifests(&fx), 3);
+
+    // Nothing is old enough, but the store is over a cap of zero.
+    let report = p
+        .prune(
+            &Retention {
+                days: 3650,
+                max_store_gb: 0,
+            },
+            now,
+            false,
+        )
+        .unwrap();
+
+    let pruned: Vec<_> = report.pruned.iter().map(|s| (s.at_ms, s.reason)).collect();
+    assert_eq!(
+        pruned,
+        [(now - 10 * DAY_MS, PruneReason::Size)],
+        "only the old point"
+    );
+    assert_eq!(manifests(&fx), 2);
+    assert!(blob(&fx, "unused").exists());
+    assert!(!blob(&fx, "old").exists());
+}

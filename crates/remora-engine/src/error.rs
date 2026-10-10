@@ -25,11 +25,12 @@ pub enum EngineError {
     UnknownRestorePoint(String),
     #[error("this restore point was pruned on {}: its files are no longer stored", crate::utc_date(*pruned_at_ms))]
     Pruned { snapshot: String, pruned_at_ms: i64 },
-    #[error(
-        "the rewind did not finish ({source}); the state before it was kept as snapshot {safety_snapshot}"
-    )]
+    #[error("{}", incomplete_message(*rolling_back, safety_snapshot, source))]
     RewindIncomplete {
         safety_snapshot: String,
+        /// True when it was the rollback of a rewind cut short, as the project opened, that
+        /// did not finish: the project stays unusable until the safety snapshot is restored.
+        rolling_back: bool,
         #[source]
         source: Box<EngineError>,
     },
@@ -47,6 +48,16 @@ pub enum EngineError {
     NoDataDir,
     #[error("blob store {path} is unavailable: {reason}")]
     BlobStoreUnavailable { path: PathBuf, reason: String },
+}
+
+fn incomplete_message(rolling_back: bool, safety: &str, source: &EngineError) -> String {
+    if rolling_back {
+        format!(
+            "rolling back an interrupted rewind failed ({source}); the state before that rewind is kept as snapshot {safety}: `remora rewind --snapshot {safety}` restores it"
+        )
+    } else {
+        format!("the rewind did not finish ({source}); the state before it was kept as snapshot {safety}")
+    }
 }
 
 /// Attach a path to an `io::Error`: `fs::read(p).map_err(io_at(p))`.

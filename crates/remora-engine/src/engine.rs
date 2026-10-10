@@ -59,8 +59,21 @@ impl Engine {
         hex::encode(self.key.verifying_key().to_bytes())
     }
 
-    /// Open (or create) the data for the project rooted at `root`.
+    /// Open (or create) the data for the project rooted at `root`. A rewind that was cut
+    /// short is rolled back first; if that fails, so does the open, with
+    /// [`EngineError::RewindIncomplete`].
     pub fn project(&self, root: &Path) -> Result<Project, EngineError> {
+        self.open_project(root, true)
+    }
+
+    /// Open the project at `root` without rolling back a rewind that was cut short: the way
+    /// out when that rollback fails. Only for [`Project::restore_snapshot`], which then
+    /// replaces the cut-short rewind's record with its own and removes it once it returns.
+    pub fn project_without_rollback(&self, root: &Path) -> Result<Project, EngineError> {
+        self.open_project(root, false)
+    }
+
+    fn open_project(&self, root: &Path, rollback: bool) -> Result<Project, EngineError> {
         let root = self.resolve_root(root)?;
         // A project that contains the data directory would snapshot (and rewind) Remora's
         // own journal, sessions and key; one inside it would rewind other projects' data.
@@ -106,7 +119,7 @@ impl Engine {
             None => blob_home::plain_copy_reason(&root, &self.data_dir),
             Some(_) => None,
         };
-        let mut project = Project::open(id, root, dir, blobs, self.key.clone())?;
+        let mut project = Project::open(id, root, dir, blobs, self.key.clone(), rollback)?;
         project.plain_copies_because = plain_copies_because;
         Ok(project)
     }
@@ -166,12 +179,9 @@ impl Engine {
                 });
             }
         }
-        // `<home>/<id>/blobs`: the folder named after the project goes, never more.
         let blob_home = recorded
             .blobs
-            .map(PathBuf::from)
-            .and_then(|blobs| blobs.parent().map(Path::to_path_buf))
-            .filter(|home| home.file_name().is_some_and(|name| name == id.as_str()));
+            .and_then(|blobs| own_blob_home(Path::new(&blobs), &id));
         // The data folder goes last: if anything fails, forgetting again finds the project.
         if let Some(home) = &blob_home {
             remove_all(home)?;
@@ -218,6 +228,22 @@ pub struct Forgotten {
     pub data_dir: PathBuf,
     /// The project's blob folder on its own volume, if it had one.
     pub blob_home: Option<PathBuf>,
+}
+
+/// The folder named after the project in `<store>/<id>/blobs`, if `blobs` is absolute and
+/// `<store>` is Remora's private folder (`.remora-store` on Unix, `.remora-store-<SID>` on
+/// Windows): forgetting removes that folder, and never any other.
+fn own_blob_home(blobs: &Path, id: &str) -> Option<PathBuf> {
+    let home = blobs.parent().filter(|_| blobs.is_absolute())?;
+    let store = home.parent()?.file_name()?.to_str()?;
+    #[cfg(not(windows))]
+    let ours = store == blob_home::STORE_DIR;
+    #[cfg(windows)]
+    let ours = store
+        .strip_prefix(blob_home::STORE_DIR)
+        .and_then(|rest| rest.strip_prefix('-'))
+        .is_some_and(|sid| !sid.is_empty());
+    (ours && home.file_name()? == id).then(|| home.to_path_buf())
 }
 
 /// Remove a folder and everything in it (symlinks are removed, never followed); one

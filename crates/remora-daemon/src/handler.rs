@@ -42,7 +42,21 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
     } else {
         job
     };
-    let open = state.open().map_err(engine_error)?;
+    let open = match state.open() {
+        Ok(open) => open,
+        // The rollback of a rewind cut short failed: restoring a snapshot by hand is the way
+        // out, and the only request answered until then.
+        Err(e @ EngineError::RewindIncomplete { .. }) => {
+            return match job {
+                Job::RestoreSnapshot { snapshot, force } => state
+                    .restore_by_hand(&snapshot, force)
+                    .map(rewound)
+                    .map_err(engine_error),
+                _ => Err(engine_error(e)),
+            };
+        }
+        Err(e) => return Err(engine_error(e)),
+    };
     let result = match job {
         Job::BeginTurn {
             session,

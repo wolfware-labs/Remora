@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, mpsc};
 use std::thread::{self, JoinHandle};
 
-use remora_engine::{Engine, EngineError, Project, RestorePoint, SessionRef};
+use remora_engine::{Engine, EngineError, Project, RestorePoint, RewindReport, SessionRef};
 use remora_ipc::{ErrorBody, ErrorKind, Response};
 use remora_snap::SnapshotId;
 
@@ -167,6 +167,19 @@ impl State {
             }
         };
         Ok(self.open.insert(open))
+    }
+
+    /// Restore `snapshot` without first rolling back a rewind that was cut short: the way
+    /// out when that rollback fails and the project cannot open. The project is not kept
+    /// open: the next job opens it as usual.
+    pub(crate) fn restore_by_hand(
+        &self,
+        snapshot: &SnapshotId,
+        force: bool,
+    ) -> Result<RewindReport, EngineError> {
+        let mut project = self.ctx.engine.project_without_rollback(&self.root)?;
+        let at = Monotonic::starting_after(latest_at_ms(&project)?).next(self.ctx.clock.now_ms());
+        project.restore_snapshot(snapshot, at, force)
     }
 }
 

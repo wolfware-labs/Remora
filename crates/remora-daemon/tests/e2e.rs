@@ -2,9 +2,9 @@
 
 mod common;
 
-use common::TestDaemon;
+use common::{START_MS, TestDaemon};
 use remora_engine::PointKind;
-use remora_ipc::{JournalCheck, Request, Response};
+use remora_ipc::{ClientError, ErrorKind, JournalCheck, Request, Response};
 
 #[test]
 fn what_rm_rf_deleted_comes_back_with_a_rewind() {
@@ -432,4 +432,69 @@ fn ending_a_session_closes_its_turn() {
 
     assert_eq!(ended, Response::TurnEnded { seq: Some(1) });
     assert!(d.status(&mut client).open_sessions.is_empty());
+}
+
+#[test]
+fn after_a_failed_rollback_only_a_restore_by_snapshot_id_is_answered() {
+    let d = TestDaemon::start();
+    d.write("a.txt", "v1");
+    let mut client = d.client();
+    d.begin(&mut client, "s1", Some("first"));
+    d.write("a.txt", "v2");
+    d.end(&mut client, "s1");
+    d.begin(&mut client, "s1", Some("second"));
+    d.end(&mut client, "s1");
+    let starts: Vec<_> = d
+        .points(&mut client)
+        .into_iter()
+        .filter(|p| p.kind == PointKind::TurnStart)
+        .map(|p| p.snapshot)
+        .collect();
+    let (safety, target) = (starts[0].clone(), starts[1].clone());
+    drop(client);
+    d.stop();
+    // A rewind from v2 to v1 cut short after its only change, and the blob of "v2", which
+    // only the safety snapshot holds, lost: the rollback cannot finish.
+    let dir = d.data.path().join("projects").join(remora_engine::project_id(
+        &d.project.path().canonicalize().unwrap(),
+    ));
+    let intent = dir.join(remora_engine::REWIND_FILE);
+    let record = format!(r#"{{"safety":"{safety}","target":"{target}","started_at_ms":{START_MS}}}"#);
+    std::fs::write(&intent, record).unwrap();
+    d.write("a.txt", "v1");
+    for shard in std::fs::read_dir(dir.join("store").join("blobs")).unwrap() {
+        for blob in std::fs::read_dir(shard.unwrap().path()).unwrap() {
+            let blob = blob.unwrap().path();
+            if std::fs::read(&blob).unwrap() == b"v2" {
+                std::fs::remove_file(blob).unwrap();
+            }
+        }
+    }
+
+    let restarted = remora_daemon::Daemon::start(common::config(d.data.path(), &d.clock)).unwrap();
+    let mut client = remora_ipc::Client::connect(d.data.path()).unwrap();
+    let refused = client.call(Request::Status { root: d.root() });
+    let restored = client.call(Request::RestoreSnapshot {
+        root: d.root(),
+        snapshot: target,
+        force: false,
+    });
+    let status = client.call(Request::Status { root: d.root() });
+    restarted.shutdown();
+    restarted.wait();
+
+    let rewind_incomplete = ErrorKind::RewindIncomplete {
+        safety_snapshot: safety.to_string(),
+    };
+    assert!(
+        matches!(&refused, Err(ClientError::Daemon(body)) if body.kind == rewind_incomplete),
+        "{refused:?}"
+    );
+    assert!(matches!(restored, Ok(Response::Rewound(_))), "{restored:?}");
+    assert_eq!(d.read("a.txt"), "v1");
+    assert!(!intent.exists(), "the record is gone");
+    let Ok(Response::Status { status }) = status else {
+        panic!("the project does not open: {status:?}");
+    };
+    assert_eq!(status.journal_entries, 3, "two turns and the restore");
 }

@@ -106,6 +106,8 @@ pub(crate) struct Store {
     /// Each readable snapshot with when it was last used (its newest restore point, else
     /// when its manifest was written) and the blobs it needs.
     pub snapshots: BTreeMap<SnapshotId, (i64, BTreeSet<String>)>,
+    /// The readable snapshots no restore point uses.
+    pub unused: BTreeSet<SnapshotId>,
     pub unreadable: Vec<SnapshotId>,
     /// Every blob with its size.
     pub blobs: BTreeMap<String, u64>,
@@ -120,7 +122,9 @@ pub(crate) struct Plan {
 }
 
 /// Choose what to prune: snapshots last used before the cutoff, then the oldest left while
-/// the blobs still needed exceed the cap. `protected` snapshots are never chosen. With an
+/// the blobs still needed exceed the cap. `protected` snapshots are never chosen, and the
+/// cap never takes a snapshot no point uses that is younger than a day (the safety snapshot
+/// of a rewind whose journal write failed: the user was handed its id). With an
 /// unreadable manifest no blob can be proven unneeded: nothing is swept, and the size rule
 /// (which could only free blobs) is skipped.
 pub(crate) fn plan(store: &Store, protected: &BTreeSet<SnapshotId>, policy: &Retention, now_ms: i64) -> Plan {
@@ -174,6 +178,9 @@ pub(crate) fn plan(store: &Store, protected: &BTreeSet<SnapshotId>, policy: &Ret
     }
     let mut store_bytes = kept_bytes(&needed);
     if sweep {
+        let young_unused =
+            |id: &SnapshotId, at: i64| store.unused.contains(id) && now_ms.saturating_sub(at) < DAY_MS;
+        let mut left = left.filter(|(id, at)| !young_unused(id, *at));
         while store_bytes > policy.max_store_bytes() {
             let Some((id, at)) = left.next() else { break };
             prune(id, at, PruneReason::Size, &mut needed);

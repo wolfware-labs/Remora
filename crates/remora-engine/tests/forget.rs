@@ -8,6 +8,13 @@ use std::path::{Path, PathBuf};
 use common::{Fixture, agent};
 use remora_engine::{EngineError, project_id};
 
+/// The name of Remora's private folder on a project's volume (on Windows it ends in the
+/// user's SID).
+#[cfg(not(windows))]
+const STORE: &str = ".remora-store";
+#[cfg(windows)]
+const STORE: &str = ".remora-store-S-1-5-21-1-2-3-1001";
+
 fn project_dir(fx: &Fixture) -> PathBuf {
     let root = fx.root().canonicalize().unwrap();
     // Canonical, as the engine reports it (`/private/var` on macOS, `\\?\` on Windows).
@@ -54,7 +61,7 @@ fn forgetting_removes_the_projects_folder_in_its_blob_home_and_nothing_else() {
     drop(fx.open());
     let volume = common::test_dir();
     let id = project_id(&fx.root().canonicalize().unwrap());
-    let store = volume.path().join(".remora-store");
+    let store = volume.path().join(STORE);
     let other = store.join("0123456789abcdef");
     fs::create_dir_all(&other).unwrap();
     record_blobs(&fx, &store.join(&id).join("blobs"));
@@ -79,6 +86,42 @@ fn a_blob_folder_not_named_after_the_project_is_left_alone() {
 
     assert_eq!(forgotten.blob_home, None);
     assert!(blobs.join("ab").join("cd").exists());
+    assert!(!project_dir(&fx).exists());
+}
+
+#[test]
+fn a_blob_folder_outside_a_remora_store_is_left_alone() {
+    let fx = Fixture::new();
+    drop(fx.open());
+    let elsewhere = common::test_dir();
+    let id = project_id(&fx.root().canonicalize().unwrap());
+    let blobs = elsewhere.path().join("photos").join(&id).join("blobs");
+    record_blobs(&fx, &blobs);
+
+    let forgotten = fx.engine().forget(fx.root(), false).unwrap();
+
+    assert_eq!(forgotten.blob_home, None);
+    assert!(blobs.join("ab").join("cd").exists());
+    assert!(!project_dir(&fx).exists());
+}
+
+#[test]
+fn a_relative_blob_folder_is_left_alone() {
+    let fx = Fixture::new();
+    drop(fx.open());
+    let root = fx.root().canonicalize().unwrap();
+    let id = project_id(&root);
+    // Recorded only: nothing is created relative to the current folder.
+    let blobs = Path::new(STORE).join(&id).join("blobs");
+    fs::write(
+        project_dir(&fx).join("project.json"),
+        serde_json::json!({"root": root, "blobs": blobs}).to_string(),
+    )
+    .unwrap();
+
+    let forgotten = fx.engine().forget(fx.root(), false).unwrap();
+
+    assert_eq!(forgotten.blob_home, None);
     assert!(!project_dir(&fx).exists());
 }
 

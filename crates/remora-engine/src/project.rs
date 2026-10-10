@@ -182,6 +182,7 @@ impl Project {
         dir: PathBuf,
         blobs: Option<PathBuf>,
         key: SigningKey,
+        rollback: bool,
     ) -> Result<Self, EngineError> {
         let snap = match blobs {
             Some(blobs) => CopySnapshotter::with_blobs(dir.join("store"), blobs, SnapOptions::default())?,
@@ -203,13 +204,16 @@ impl Project {
             pruned,
             plain_copies_because: None,
         };
-        project.recover_interrupted_rewind()?;
+        if rollback {
+            project.recover_interrupted_rewind()?;
+        }
         Ok(project)
     }
 
     /// Roll back a rewind that was cut short: restore its safety snapshot and journal what
     /// happened. If the rollback fails, the intent record stays and opening the project keeps
-    /// failing with `RewindIncomplete`, naming the safety snapshot to restore by hand.
+    /// failing with `RewindIncomplete`, naming the safety snapshot to restore by hand (see
+    /// [`crate::Engine::project_without_rollback`]).
     fn recover_interrupted_rewind(&mut self) -> Result<(), EngineError> {
         let path = self.dir.join(REWIND_FILE);
         let intent: RewindIntent = match std::fs::read(&path) {
@@ -223,6 +227,7 @@ impl Project {
         let _lock = self.lock()?;
         let incomplete = |source: EngineError| EngineError::RewindIncomplete {
             safety_snapshot: intent.safety.clone(),
+            rolling_back: true,
             source: Box::new(source),
         };
         let safety = SnapshotId::parse(&intent.safety).map_err(|e| incomplete(e.into()))?;
@@ -238,10 +243,19 @@ impl Project {
                 source: std::io::Error::other(error.clone()),
             }));
         }
-        let changes = self
+        let changes = match self
             .take_snapshot()
             .and_then(|after| self.changes_between(&before, &after))
-            .unwrap_or_default();
+        {
+            Ok(changes) => changes,
+            Err(e) => {
+                log::warn!(
+                    "project {}: journaling the rollback without its changes: {e}",
+                    self.root.display()
+                );
+                Vec::new()
+            }
+        };
         self.journal
             .append(EntryRecord {
                 session_id: REWIND_SESSION.to_owned(),
@@ -259,7 +273,8 @@ impl Project {
                 late_start: None,
             })
             .map_err(|e| incomplete(e.into()))?;
-        std::fs::remove_file(&path).map_err(io_at(&path))?;
+        // Left in place, the record would roll the project back again at the next open.
+        remove_durably(&path).map_err(incomplete)?;
         log::warn!(
             "project {}: an interrupted rewind to {} was rolled back to {}",
             self.root.display(),
@@ -355,6 +370,7 @@ impl Project {
         }
         let mut store = retention::Store {
             snapshots: BTreeMap::new(),
+            unused: BTreeSet::new(),
             unreadable: Vec::new(),
             blobs: self.snap.blobs()?,
         };
@@ -362,7 +378,13 @@ impl Project {
             match self.snap.manifest(&stored.id) {
                 Ok(manifest) => {
                     // A manifest no point uses (a turn's end state, say) ages from when it was written.
-                    let at = used.get(&stored.id).copied().unwrap_or(stored.modified_ms);
+                    let at = match used.get(&stored.id) {
+                        Some(&at) => at,
+                        None => {
+                            store.unused.insert(stored.id.clone());
+                            stored.modified_ms
+                        }
+                    };
                     let blobs = manifest.stored_blobs().map(str::to_owned).collect();
                     store.snapshots.insert(stored.id, (at, blobs));
                 }
@@ -836,14 +858,15 @@ impl Project {
         // snapshot: the rewind can always be undone.
         let incomplete = |source: EngineError| EngineError::RewindIncomplete {
             safety_snapshot: safety.to_string(),
+            rolling_back: false,
             source: Box::new(source),
         };
         let restore = self.snap.restore(&self.root, target);
         let restored_cleanly = matches!(&restore, Ok(r) if r.failed.is_empty());
         let entry = self.journal_rewind(&safety, target, at_ms, restored_cleanly);
-        if let Err(e) = std::fs::remove_file(&intent_path) {
+        if let Err(e) = remove_durably(&intent_path) {
             // Left in place, it would roll this rewind back at the next open.
-            return Err(incomplete(io_at(&intent_path)(e)));
+            return Err(incomplete(e));
         }
         match (restore, entry) {
             (Ok(restore), Ok(entry)) => Ok(RewindReport {
@@ -914,6 +937,13 @@ impl Project {
     pub fn journal(&self) -> &Journal {
         &self.journal
     }
+}
+
+/// Remove the rewind's intent record for good: a power loss right after must not bring it
+/// back and roll a finished rewind back.
+fn remove_durably(path: &Path) -> Result<(), EngineError> {
+    std::fs::remove_file(path).map_err(io_at(path))?;
+    fsutil::sync_parent(path).map_err(io_at(path))
 }
 
 /// The same point: everything but its position and whether its turn is still open, both

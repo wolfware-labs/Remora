@@ -134,31 +134,47 @@ fn a_finished_rewind_leaves_no_intent_record() {
     assert_eq!(fx.open().take_notice(), None);
 }
 
-#[test]
-fn a_rollback_that_fails_keeps_the_record_and_names_the_safety_snapshot() {
+/// A rewind from B to A cut short after its first change, whose rollback cannot finish:
+/// the blob of `a2`, which only the safety snapshot holds, is lost. Returns the target, the
+/// safety point, and the lost blob with its contents.
+fn a_failed_rollback(fx: &Fixture) -> (RestorePoint, RestorePoint, PathBuf, Vec<u8>) {
     use sha2::{Digest, Sha256};
-    let fx = Fixture::new();
-    let (target, safety) = two_states(&fx);
-    write_intent(&fx, &safety, &target);
+    let (target, safety) = two_states(fx);
+    write_intent(fx, &safety, &target);
     fx.write("a.txt", "a1");
-    // Lose the blob the rollback needs ("a2" is only in the safety snapshot).
     let hash = hex::encode(Sha256::digest(b"a2"));
-    let blob = project_dir(&fx)
+    let blob = project_dir(fx)
         .join("store/blobs")
         .join(&hash[..2])
         .join(&hash[2..]);
     let saved = fs::read(&blob).unwrap();
     fs::remove_file(&blob).unwrap();
+    (target, safety, blob, saved)
+}
+
+#[test]
+fn a_rollback_that_fails_keeps_the_record_and_names_the_safety_snapshot() {
+    let fx = Fixture::new();
+    let (_, safety, blob, saved) = a_failed_rollback(&fx);
 
     for _ in 0..2 {
         let result = fx.engine().project(fx.root());
-        let Err(EngineError::RewindIncomplete { safety_snapshot, .. }) = result else {
-            panic!(
-                "expected RewindIncomplete, got {:?}",
-                result.map(|p| p.id().to_owned())
-            );
+        let Err(e) = result else {
+            panic!("expected RewindIncomplete, the project opened");
         };
-        assert_eq!(safety_snapshot, safety.snapshot.to_string());
+        let EngineError::RewindIncomplete { safety_snapshot, .. } = &e else {
+            panic!("expected RewindIncomplete, got {e:?}");
+        };
+        assert_eq!(*safety_snapshot, safety.snapshot.to_string());
+        let message = e.to_string();
+        assert!(
+            message.contains("rolling back an interrupted rewind failed"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("remora rewind --snapshot {}", safety.snapshot)),
+            "{message}"
+        );
         assert!(intent_path(&fx).exists(), "the record stays");
     }
 
@@ -168,6 +184,67 @@ fn a_rollback_that_fails_keeps_the_record_and_names_the_safety_snapshot() {
     assert_eq!(fx.read("a.txt"), "a2");
     assert!(!intent_path(&fx).exists());
     assert!(p.take_notice().is_some());
+}
+
+#[test]
+fn after_a_failed_rollback_a_snapshot_is_restored_by_hand() {
+    let fx = Fixture::new();
+    let (target, _, _, _) = a_failed_rollback(&fx);
+    let engine = fx.engine();
+
+    let mut p = engine.project_without_rollback(fx.root()).unwrap();
+    p.begin_turn(&agent(), Some("still running"), 6_000).unwrap();
+    let refused = p.restore_snapshot(&target.snapshot, 7_000, false);
+    assert!(
+        matches!(refused, Err(EngineError::TurnInProgress { .. })),
+        "{refused:?}"
+    );
+    assert!(intent_path(&fx).exists(), "nothing changed");
+    let report = p.restore_snapshot(&target.snapshot, 8_000, true).unwrap();
+
+    assert_eq!(fx.read("a.txt"), "a1");
+    assert_eq!(fx.read("b.txt"), "b1");
+    assert_eq!(fx.read("dir/c.txt"), "c1");
+    assert!(!fx.exists("new.txt"));
+    assert!(!intent_path(&fx).exists(), "the old record is gone");
+    let last = p.journal().entries().unwrap().pop().unwrap().record;
+    assert_eq!(last.kind, EntryKind::Rewind);
+    assert_eq!(last.rewind_target, Some(target.snapshot.to_string()));
+    assert_eq!(last.snapshot_id, Some(report.safety_snapshot.to_string()));
+    assert_eq!(last.interrupted, None);
+    drop(p);
+    let mut p = fx.open();
+    assert_eq!(p.take_notice(), None, "nothing was rolled back");
+    assert_eq!(fx.read("a.txt"), "a1");
+}
+
+/// The rollback succeeds but its record cannot be removed (another process holds it open
+/// without delete sharing): the open fails with the safety snapshot, not a bare I/O error.
+#[cfg(windows)]
+#[test]
+fn a_record_that_cannot_be_removed_after_the_rollback_names_the_safety_snapshot() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 1;
+    let fx = Fixture::new();
+    let (target, safety) = two_states(&fx);
+    write_intent(&fx, &safety, &target);
+    let held = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(intent_path(&fx))
+        .unwrap();
+
+    let result = fx.engine().project(fx.root());
+
+    let Err(EngineError::RewindIncomplete { safety_snapshot, .. }) = result else {
+        panic!(
+            "expected RewindIncomplete, got {:?}",
+            result.map(|p| p.id().to_owned())
+        );
+    };
+    assert_eq!(safety_snapshot, safety.snapshot.to_string());
+    drop(held);
+    assert!(fx.open().take_notice().is_some(), "the next open finishes");
 }
 
 #[test]
