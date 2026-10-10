@@ -77,6 +77,14 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Remove restore points the retention policy no longer keeps (see `remora status`)
+    Prune {
+        #[command(flatten)]
+        project: Project,
+        /// Only show what would be removed
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Check the signed journal for tampering
     Verify {
         #[command(flatten)]
@@ -195,6 +203,7 @@ fn run(cli: Cli) -> Result<(), CliError> {
             commands::rewind::run(&ctx, &root(&project)?, &target, yes, force)
         }
         Command::Verify { project, json } => commands::verify::run(&ctx, &root(&project)?, json),
+        Command::Prune { project, dry_run } => commands::prune::run(&ctx, &root(&project)?, dry_run),
         Command::Service { action } => match action {
             ServiceAction::Install => {
                 println!("{}", commands::service::install(&ctx)?);

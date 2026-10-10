@@ -132,6 +132,21 @@ impl Engine {
         }
     }
 
+    /// The roots of every project recorded in the data directory. Unreadable project
+    /// files are skipped.
+    pub fn project_roots(&self) -> Result<Vec<PathBuf>, EngineError> {
+        let projects = self.data_dir.join("projects");
+        let mut roots = Vec::new();
+        for entry in fs::read_dir(&projects).map_err(io_at(&projects))? {
+            let file = entry.map_err(io_at(&projects))?.path().join("project.json");
+            if let Ok(Some(recorded)) = read_project_file(&file) {
+                roots.push(PathBuf::from(recorded.root));
+            }
+        }
+        roots.sort();
+        Ok(roots)
+    }
+
     /// Whether a project is recorded with exactly this canonical root.
     fn has_project_at(&self, root: &Path) -> bool {
         let file = self

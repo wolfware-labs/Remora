@@ -34,6 +34,9 @@ pub struct DaemonConfig {
     pub stale_turn_after: Duration,
     /// How often stale turns are looked for (default 1 minute).
     pub sweep_every: Duration,
+    /// How often every project is pruned (default 1 day; see `config`). The time of the
+    /// last prune is kept in `janitor.json`, so restarts do not postpone it.
+    pub prune_every: Duration,
     /// Connections with no request for this long are closed (default 30 seconds). Not
     /// enforced on Windows, whose named pipes have no read timeouts.
     pub idle_connection_after: Duration,
@@ -46,6 +49,7 @@ impl DaemonConfig {
             clock: Arc::new(SystemClock),
             stale_turn_after: Duration::from_secs(6 * 60 * 60),
             sweep_every: Duration::from_secs(60),
+            prune_every: Duration::from_secs(24 * 60 * 60),
             idle_connection_after: Duration::from_secs(30),
         }
     }
@@ -105,10 +109,12 @@ impl Daemon {
                 engine,
                 clock: config.clock,
                 stale_after_ms: i64::try_from(config.stale_turn_after.as_millis()).unwrap_or(i64::MAX),
+                config: crate::config::load(&data_dir),
             }),
             data_dir,
             endpoint,
             idle_connection_after: config.idle_connection_after,
+            prune_every_ms: i64::try_from(config.prune_every.as_millis()).unwrap_or(i64::MAX),
             workers: Mutex::new(Some(Workers::default())),
             worker_threads: Mutex::new(Vec::new()),
             stopping: Mutex::new(false),
@@ -169,6 +175,12 @@ impl DaemonHandle {
         self.shared.sweep();
     }
 
+    /// Prune every project if the last prune is `prune_every` old (the janitor checks this
+    /// periodically).
+    pub fn prune_if_due(&self) {
+        self.shared.prune_if_due();
+    }
+
     /// Block until the daemon has shut down: no listener, no workers, lock released.
     /// Idle connections are not waited for; on Windows each keeps its pipe instance (and so
     /// the pipe name) until the client closes it or this process exits.
@@ -211,6 +223,7 @@ struct Shared {
     data_dir: PathBuf,
     endpoint: Endpoint,
     idle_connection_after: Duration,
+    prune_every_ms: i64,
     /// `None` once shutting down.
     workers: Mutex<Option<Workers>>,
     worker_threads: Mutex<Vec<JoinHandle<()>>>,
@@ -259,6 +272,47 @@ impl Shared {
         for worker in workers {
             if let Err(e) = worker.run(Job::Sweep) {
                 log::warn!("closing idle turns failed: {e}");
+            }
+        }
+    }
+
+    /// Prune every recorded project whose folder still exists, once per `prune_every`.
+    fn prune_if_due(&self) {
+        let path = self.data_dir.join(JANITOR_FILE);
+        let now = self.ctx.clock.now_ms();
+        let last = fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<JanitorFile>(&bytes).ok())
+            .map(|file| file.last_prune_ms);
+        if last.is_some_and(|last| (0..self.prune_every_ms).contains(&(now - last))) {
+            return;
+        }
+        // Recorded first: a prune that keeps failing is retried the next day, not every minute.
+        let json = serde_json::to_vec(&JanitorFile { last_prune_ms: now }).expect("serializes");
+        if let Err(e) = fs::write(&path, json) {
+            log::warn!("cannot record the prune time in {}: {e}", path.display());
+        }
+        let roots = match self.ctx.engine.project_roots() {
+            Ok(roots) => roots,
+            Err(e) => {
+                log::warn!("listing the projects to prune failed: {e}");
+                return;
+            }
+        };
+        for root in roots {
+            // Opening a project whose folder is gone would recreate it.
+            if !root.is_dir() || self.is_stopping() {
+                continue;
+            }
+            match self.run(&root, Job::Prune { dry_run: false }) {
+                Ok(Response::Pruned { report }) if !report.pruned.is_empty() => log::info!(
+                    "pruned {} restore points of {}, freed {} bytes",
+                    report.pruned.len(),
+                    root.display(),
+                    report.bytes_freed
+                ),
+                Ok(_) => {}
+                Err(e) => log::warn!("pruning {} failed: {e}", root.display()),
             }
         }
     }
@@ -341,6 +395,7 @@ impl Shared {
             Request::Rewind { root, point, force } => self.run(&root, Job::Rewind { point, force }),
             Request::Status { root } => self.run(&root, Job::Status),
             Request::Verify { root } => self.run(&root, Job::Verify),
+            Request::Prune { root, dry_run } => self.run(&root, Job::Prune { dry_run }),
         }
     }
 
@@ -535,7 +590,16 @@ fn janitor_loop(shared: &Shared, every: Duration) {
         }
         drop(stopping);
         shared.sweep();
+        shared.prune_if_due();
     }
+}
+
+/// When the janitor last pruned, in the data directory.
+const JANITOR_FILE: &str = "janitor.json";
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct JanitorFile {
+    last_prune_ms: i64,
 }
 
 /// Answer one client's requests, in order, until it disconnects, goes idle or sends

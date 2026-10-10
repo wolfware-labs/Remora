@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use remora_journal::{
@@ -10,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::io_at;
 use crate::lock::ProjectLock;
+use crate::retention::{self, PRUNED_FILE, PruneReport, Pruned, Retention};
 use crate::session::{self, OpenTurn, SessionRef};
 use crate::{EngineError, fsutil};
 
@@ -64,6 +66,9 @@ pub struct RestorePoint {
     /// have started, so the point may include its effects.
     #[serde(default)]
     pub late: bool,
+    /// When retention removed the point's files; a pruned point cannot be rewound to.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pruned_at_ms: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -105,6 +110,12 @@ pub struct Status {
     /// (copy-on-write) or copied them; `None` until one has.
     #[serde(default)]
     pub copy_on_write: Option<bool>,
+    /// The retention in effect, when the daemon reports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retention: Option<Retention>,
+    /// Why the configuration file was not used, if it was not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub config_problem: Option<String>,
 }
 
 enum Item {
@@ -124,6 +135,8 @@ pub struct Project {
     /// Something the next snapshot's caller should tell the user once (an interrupted rewind
     /// that was rolled back when the project opened).
     notice: Option<String>,
+    /// Snapshots removed by retention (see `retention`).
+    pruned: Pruned,
 }
 
 /// `rewind.json`: written before a rewind changes anything, removed once it is journaled.
@@ -170,6 +183,7 @@ impl Project {
         let journal = Journal::open(&dir.join("journal.db"), key)?;
         let sessions = dir.join("sessions");
         fsutil::private_dir(&sessions).map_err(io_at(&sessions))?;
+        let pruned = retention::load_pruned(&dir.join(PRUNED_FILE))?;
         let mut project = Self {
             id,
             root,
@@ -179,6 +193,7 @@ impl Project {
             last_unprotected: Vec::new(),
             copy_on_write: None,
             notice: None,
+            pruned,
         };
         project.recover_interrupted_rewind()?;
         Ok(project)
@@ -279,7 +294,105 @@ impl Project {
             self.copy_on_write = Some(s.cloned_files > 0);
         }
         self.last_unprotected = s.unprotected;
+        // The same tree as a pruned snapshot: stored again, so restorable again.
+        if self.pruned.remove(s.id.as_str()).is_some() {
+            retention::save_pruned(&self.dir.join(PRUNED_FILE), &self.pruned)?;
+        }
         Ok(s.id)
+    }
+
+    /// Refuse a snapshot whose files retention removed.
+    fn refuse_pruned(&self, snapshot: &SnapshotId) -> Result<(), EngineError> {
+        match self.pruned.get(snapshot.as_str()) {
+            Some(&pruned_at_ms) => Err(EngineError::Pruned {
+                snapshot: snapshot.to_string(),
+                pruned_at_ms,
+            }),
+            None => Ok(()),
+        }
+    }
+
+    /// Apply `policy`: remove the restore points it no longer keeps, then every stored file
+    /// no remaining snapshot needs. Never removed: the newest point, the points of open
+    /// turns, and the state before the latest rewind (so it can still be undone). With
+    /// `dry_run`, only report what would go.
+    pub fn prune(
+        &mut self,
+        policy: &Retention,
+        now_ms: i64,
+        dry_run: bool,
+    ) -> Result<PruneReport, EngineError> {
+        let _lock = self.lock()?;
+        let points = self.points()?;
+        let mut protected: BTreeSet<SnapshotId> = points
+            .iter()
+            .take(1)
+            .chain(points.iter().filter(|p| p.open))
+            .map(|p| p.snapshot.clone())
+            .collect();
+        let latest_rewind = self
+            .journal
+            .entries()?
+            .into_iter()
+            .rev()
+            .find(|e| e.record.kind == EntryKind::Rewind)
+            .and_then(|e| e.record.snapshot_id);
+        if let Some(safety) = latest_rewind {
+            protected.insert(SnapshotId::parse(&safety)?);
+        }
+        let mut used: BTreeMap<SnapshotId, i64> = BTreeMap::new();
+        for point in &points {
+            let at = used.entry(point.snapshot.clone()).or_insert(point.at_ms);
+            *at = (*at).max(point.at_ms);
+        }
+        let mut store = retention::Store {
+            snapshots: BTreeMap::new(),
+            unreadable: Vec::new(),
+            blobs: self.snap.blobs()?,
+        };
+        for stored in self.snap.snapshots()? {
+            match self.snap.manifest(&stored.id) {
+                Ok(manifest) => {
+                    // A manifest no point uses (a turn's end state, say) ages from when it was written.
+                    let at = used.get(&stored.id).copied().unwrap_or(stored.modified_ms);
+                    let blobs = manifest.stored_blobs().map(str::to_owned).collect();
+                    store.snapshots.insert(stored.id, (at, blobs));
+                }
+                Err(e) => {
+                    log::warn!(
+                        "project {}: snapshot {} is unreadable, kept: {e}",
+                        self.root.display(),
+                        stored.id
+                    );
+                    store.unreadable.push(stored.id);
+                }
+            }
+        }
+        let plan = retention::plan(&store, &protected, policy, now_ms);
+        if !dry_run && !plan.pruned.is_empty() {
+            // Recorded first: a crash part-way leaves points marked pruned whose files may
+            // still be there, never a point listed as restorable whose files are gone.
+            for p in &plan.pruned {
+                self.pruned.insert(p.snapshot.to_string(), now_ms);
+            }
+            retention::save_pruned(&self.dir.join(PRUNED_FILE), &self.pruned)?;
+            for p in &plan.pruned {
+                self.snap.remove_snapshot(&p.snapshot)?;
+            }
+        }
+        if !dry_run {
+            for hash in &plan.doomed_blobs {
+                self.snap.remove_blob(hash)?;
+            }
+        }
+        Ok(PruneReport {
+            dry_run,
+            pruned: plan.pruned,
+            blobs_removed: plan.doomed_blobs.len(),
+            bytes_freed: plan.bytes_freed,
+            store_bytes: plan.store_bytes,
+            unreadable: store.unreadable,
+        })
     }
 
     /// A turn starts: snapshot the project before the agent changes anything.
@@ -552,6 +665,7 @@ impl Project {
                                 },
                                 open: false,
                                 late: false,
+                                pruned_at_ms: None,
                             }),
                         ));
                     }
@@ -593,6 +707,9 @@ impl Project {
             })
             .collect();
         points.reverse();
+        for point in &mut points {
+            point.pruned_at_ms = self.pruned.get(point.snapshot.as_str()).copied();
+        }
         Ok(points)
     }
 
@@ -617,6 +734,7 @@ impl Project {
         let _lock = self.lock()?;
         self.refuse_while_a_turn_is_open(force)?;
         let commands_after = self.commands_after(point)?;
+        self.refuse_pruned(&point.snapshot)?;
         self.restore_to(&point.snapshot, commands_after, at_ms)
     }
 
@@ -631,6 +749,7 @@ impl Project {
     ) -> Result<RewindReport, EngineError> {
         let _lock = self.lock()?;
         self.refuse_while_a_turn_is_open(force)?;
+        self.refuse_pruned(snapshot)?;
         // An unknown id is refused before anything changes.
         match self.snap.manifest(snapshot) {
             Ok(_) => {}
@@ -647,6 +766,7 @@ impl Project {
     pub fn preview(&mut self, point: &RestorePoint) -> Result<Preview, EngineError> {
         let _lock = self.lock()?;
         let commands_after = self.commands_after(point)?;
+        self.refuse_pruned(&point.snapshot)?;
         let now = self.take_snapshot()?;
         let current = self.snap.manifest(&now)?;
         let target = self.snap.manifest(&point.snapshot)?;
@@ -776,6 +896,8 @@ impl Project {
             last_unprotected: self.last_unprotected.clone(),
             blob_store: self.snap.blobs_dir().to_path_buf(),
             copy_on_write: self.copy_on_write,
+            retention: None,
+            config_problem: None,
         })
     }
 
@@ -829,6 +951,7 @@ fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), E
                 label: label.map(short_label),
                 open: turn.open,
                 late,
+                pruned_at_ms: None,
             }))
         };
     if let Some(pre) = turn.pre_snapshot {

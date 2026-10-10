@@ -69,6 +69,18 @@ pub enum Node {
     Opaque,
 }
 
+impl Manifest {
+    /// The hashes of the blobs this snapshot needs to be restored.
+    pub fn stored_blobs(&self) -> impl Iterator<Item = &str> {
+        self.nodes.values().filter_map(|node| match node {
+            Node::File {
+                hash, stored: true, ..
+            } => Some(hash.as_str()),
+            _ => None,
+        })
+    }
+}
+
 impl Node {
     /// True when restore must leave this path untouched.
     pub fn is_protected_gap(&self) -> bool {

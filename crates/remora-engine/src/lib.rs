@@ -10,6 +10,8 @@
 //! projects/<id>/store/             snapshot store (its blobs, unless "blobs" names another folder)
 //! projects/<id>/journal.db         signed, hash-chained journal
 //! projects/<id>/sessions/<id>.json open turns (survive restarts)
+//! projects/<id>/rewind.json        the rewind in progress, if any (see `Project::open`)
+//! projects/<id>/pruned.json        snapshots removed by retention, and when
 //! projects/<id>/lock               serializes processes working on the project
 //! blob-home.lock                   serializes choosing the blob folder of new projects
 //! ```
@@ -24,6 +26,7 @@ mod error;
 mod fsutil;
 mod lock;
 mod project;
+mod retention;
 mod session;
 mod winuser;
 
@@ -33,5 +36,6 @@ pub use project::{
     MAX_LABEL_BYTES, PointKind, Preview, Project, REMORA_AGENT, REWIND_FILE, REWIND_SESSION,
     ROLLED_BACK_LABEL, ROLLED_BACK_NOTICE, RestorePoint, RewindReport, Status, short_label,
 };
+pub use retention::{PRUNED_FILE, PruneReason, PruneReport, PrunedSnapshot, Retention, utc_date};
 pub use session::SessionRef;
 pub use winuser::user_sid;

@@ -2,6 +2,7 @@
 //! carrying the exit code on failure.
 
 pub mod log;
+pub mod prune;
 pub mod rewind;
 pub mod service;
 pub mod setup;
@@ -153,14 +154,16 @@ pub fn kind_name(kind: PointKind) -> &'static str {
 }
 
 /// A point's kind for people, with "(late)" when its checkpoint finished after the agent
-/// stopped waiting.
+/// stopped waiting and "(pruned)" when retention removed its files.
 pub fn point_kind(point: &RestorePoint) -> String {
-    let kind = kind_name(point.kind);
+    let mut kind = kind_name(point.kind).to_owned();
     if point.late {
-        format!("{kind} (late)")
-    } else {
-        kind.to_owned()
+        kind.push_str(" (late)");
     }
+    if point.pruned_at_ms.is_some() {
+        kind.push_str(" (pruned)");
+    }
+    kind
 }
 
 /// A label on one line, at most `max` characters.
@@ -200,6 +203,25 @@ pub fn open_sessions(points: &[RestorePoint]) -> Vec<(String, i64, i64, Option<S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_point_kind_says_late_and_pruned() {
+        let mut point = RestorePoint {
+            position: 0,
+            snapshot: remora_snap::SnapshotId::parse(&"a".repeat(64)).unwrap(),
+            kind: PointKind::BeforeCommand,
+            session_id: "s1".into(),
+            at_ms: 0,
+            label: None,
+            open: false,
+            late: false,
+            pruned_at_ms: None,
+        };
+        assert_eq!(point_kind(&point), "before command");
+        point.late = true;
+        point.pruned_at_ms = Some(1);
+        assert_eq!(point_kind(&point), "before command (late) (pruned)");
+    }
 
     #[test]
     fn ages_read_naturally() {

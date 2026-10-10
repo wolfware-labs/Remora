@@ -5,10 +5,11 @@
 //! listener thread   accepts connections (socket file / named pipe)
 //! connection thread one per client, one request at a time
 //! project worker    one thread per project, runs its requests strictly in order
-//! janitor           closes turns idle for 6 hours as interrupted
+//! janitor           closes turns idle for 6 hours as interrupted; prunes daily (see `config`)
 //! ```
 
 mod clock;
+pub mod config;
 mod detach;
 mod foreground;
 mod handler;

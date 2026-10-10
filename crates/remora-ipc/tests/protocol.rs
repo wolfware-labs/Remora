@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use remora_engine::{PointKind, RestorePoint, Status};
+use remora_engine::{PointKind, PruneReason, PruneReport, PrunedSnapshot, RestorePoint, Retention, Status};
 use remora_ipc::{
     ErrorBody, ErrorKind, FailedPath, JournalCheck, Outcome, Preview, Request, RequestEnvelope, Response,
     ResponseEnvelope, Rewound,
@@ -25,6 +25,7 @@ fn point() -> RestorePoint {
         label: Some("rm -rf build".into()),
         open: false,
         late: false,
+        pruned_at_ms: None,
     }
 }
 
@@ -143,6 +144,13 @@ fn every_request_has_a_stable_wire_form() {
     request(
         Request::Verify { root: root() },
         json!({"type": "verify", "root": "/home/me/proj"}),
+    );
+    request(
+        Request::Prune {
+            root: root(),
+            dry_run: true,
+        },
+        json!({"type": "prune", "root": "/home/me/proj", "dry_run": true}),
     );
     request(
         Request::EndSession {
@@ -279,11 +287,37 @@ fn every_response_has_a_stable_wire_form() {
                 last_unprotected: vec![PathBuf::from("/home/me/proj/secret")],
                 blob_store: PathBuf::from("/mnt/work/.remora-store/0123456789abcdef/blobs"),
                 copy_on_write: Some(true),
+                retention: Some(Retention {
+                    days: 30,
+                    max_store_gb: 10,
+                }),
+                config_problem: Some("config.toml: unknown field `dayz`".into()),
             },
         },
         json!({"type": "status", "status": {"root": "/home/me/proj", "open_sessions": ["s1"], "journal_entries": 2,
                "restore_points": 5, "last_unprotected": ["/home/me/proj/secret"],
-               "blob_store": "/mnt/work/.remora-store/0123456789abcdef/blobs", "copy_on_write": true}}),
+               "blob_store": "/mnt/work/.remora-store/0123456789abcdef/blobs", "copy_on_write": true,
+               "retention": {"days": 30, "max_store_gb": 10},
+               "config_problem": "config.toml: unknown field `dayz`"}}),
+    );
+    ok(
+        Response::Pruned {
+            report: PruneReport {
+                dry_run: false,
+                pruned: vec![PrunedSnapshot {
+                    snapshot: snap('e'),
+                    at_ms: 1_000,
+                    reason: PruneReason::Age,
+                }],
+                blobs_removed: 2,
+                bytes_freed: 300,
+                store_bytes: 4_000,
+                unreadable: Vec::new(),
+            },
+        },
+        json!({"type": "pruned", "report": {"dry_run": false,
+               "pruned": [{"snapshot": "e".repeat(64), "at_ms": 1000, "reason": "age"}],
+               "blobs_removed": 2, "bytes_freed": 300, "store_bytes": 4000}}),
     );
     ok(
         Response::Verified {
@@ -342,6 +376,12 @@ fn every_error_has_a_stable_wire_form() {
     err(
         ErrorKind::UnknownRestorePoint,
         json!({"kind": "unknown_restore_point"}),
+    );
+    err(
+        ErrorKind::Pruned {
+            pruned_at_ms: 86_400_000,
+        },
+        json!({"kind": "pruned", "pruned_at_ms": 86_400_000}),
     );
     err(
         ErrorKind::RootOverlapsDataDir,

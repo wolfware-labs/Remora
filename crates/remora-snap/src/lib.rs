@@ -13,7 +13,7 @@ mod statcache;
 
 use std::path::{Path, PathBuf};
 
-pub use copy::CopySnapshotter;
+pub use copy::{CopySnapshotter, StoredSnapshot};
 pub use error::SnapError;
 pub use manifest::{Change, ChangeKind, Manifest, Node, RecordedOptions, SnapshotId};
 

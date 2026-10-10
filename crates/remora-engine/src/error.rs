@@ -21,6 +21,8 @@ pub enum EngineError {
     TurnInProgress { session: String },
     #[error("{0} is not a restore point of this project")]
     UnknownRestorePoint(String),
+    #[error("this restore point was pruned on {}: its files are no longer stored", crate::utc_date(*pruned_at_ms))]
+    Pruned { snapshot: String, pruned_at_ms: i64 },
     #[error(
         "the rewind did not finish ({source}); the state before it was kept as snapshot {safety_snapshot}"
     )]

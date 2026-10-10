@@ -11,7 +11,7 @@
 //! Files go into and come out of the blob store by cloning (copy-on-write: APFS, btrfs,
 //! XFS, ReFS) where the filesystem can, else by copying, one file at a time.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -149,6 +149,99 @@ impl CopySnapshotter {
         }
         result
     }
+
+    /// Every snapshot in the store (one manifest each), in no particular order.
+    pub fn snapshots(&self) -> Result<Vec<StoredSnapshot>, SnapError> {
+        let dir = self.store.join("manifests");
+        let mut out = Vec::new();
+        for entry in fs::read_dir(&dir).map_err(io_at(&dir))? {
+            let entry = entry.map_err(io_at(&dir))?;
+            let name = entry.file_name();
+            // Leftover temporary files and anything else that is not a manifest.
+            let Some(id) = name
+                .to_str()
+                .and_then(|n| n.strip_suffix(".json"))
+                .and_then(|n| SnapshotId::parse(n).ok())
+            else {
+                continue;
+            };
+            let path = entry.path();
+            let modified = entry
+                .metadata()
+                .and_then(|m| m.modified())
+                .map_err(io_at(&path))?;
+            out.push(StoredSnapshot {
+                id,
+                modified_ms: epoch_ms(modified),
+            });
+        }
+        Ok(out)
+    }
+
+    /// Delete a snapshot's manifest. Its blobs stay until removed with [`Self::remove_blob`];
+    /// a snapshot that is already gone is not an error.
+    pub fn remove_snapshot(&self, id: &SnapshotId) -> Result<(), SnapError> {
+        let path = self.manifest_path(id);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_at(&path)(e)),
+        }
+    }
+
+    /// Every blob in the store, by hash, with its size in bytes.
+    pub fn blobs(&self) -> Result<BTreeMap<String, u64>, SnapError> {
+        let mut out = BTreeMap::new();
+        for prefix in fs::read_dir(&self.blobs).map_err(io_at(&self.blobs))? {
+            let prefix = prefix.map_err(io_at(&self.blobs))?;
+            let Some(head) = prefix.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // `tmp` and anything else that is not a two-hex-digit folder.
+            if head.len() != 2 || !prefix.file_type().is_ok_and(|t| t.is_dir()) {
+                continue;
+            }
+            let dir = prefix.path();
+            for blob in fs::read_dir(&dir).map_err(io_at(&dir))? {
+                let blob = blob.map_err(io_at(&dir))?;
+                let Some(hash) = blob.file_name().to_str().map(|tail| format!("{head}{tail}")) else {
+                    continue;
+                };
+                if !is_sha256_hex(&hash) {
+                    continue;
+                }
+                let size = blob.metadata().map_err(io_at(&blob.path()))?.len();
+                out.insert(hash, size);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Delete a blob. A blob that is already gone is not an error.
+    pub fn remove_blob(&self, hash: &str) -> Result<(), SnapError> {
+        if !is_sha256_hex(hash) {
+            return Err(SnapError::InvalidId(hash.to_owned()));
+        }
+        let path = self.blob_path(hash);
+        match fs::remove_file(&path) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(io_at(&path)(e)),
+        }
+    }
+}
+
+/// A snapshot in the store, and when its manifest was written (milliseconds since the Unix
+/// epoch).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredSnapshot {
+    pub id: SnapshotId,
+    pub modified_ms: i64,
+}
+
+fn epoch_ms(at: std::time::SystemTime) -> i64 {
+    at.duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// A file put into the blob store.

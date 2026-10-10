@@ -11,6 +11,7 @@ use remora_ipc::{ErrorBody, ErrorKind, Response};
 use remora_snap::SnapshotId;
 
 use crate::clock::{Clock, Monotonic};
+use crate::config::Config;
 
 /// Work for a project worker.
 #[derive(Debug)]
@@ -57,6 +58,10 @@ pub(crate) enum Job {
     Verify,
     /// Close turns that have been idle for too long (see [`Open::sweep`]).
     Sweep,
+    /// Apply the retention policy (see [`remora_engine::Project::prune`]).
+    Prune {
+        dry_run: bool,
+    },
 }
 
 pub(crate) type Reply = Result<Response, ErrorBody>;
@@ -70,6 +75,8 @@ pub(crate) struct Context {
     pub clock: Arc<dyn Clock>,
     /// Turns with no event for this long are closed as interrupted.
     pub stale_after_ms: i64,
+    /// What `config.toml` says, read at start.
+    pub config: Config,
 }
 
 /// A worker's state: the project, opened on first use and reopened after a panic.
@@ -115,6 +122,10 @@ impl Open {
 }
 
 impl State {
+    pub(crate) fn context(&self) -> Arc<Context> {
+        Arc::clone(&self.ctx)
+    }
+
     /// The open project, opening it first if needed. Opening closes turns that went stale
     /// while the daemon was not running.
     pub(crate) fn open(&mut self) -> Result<&mut Open, EngineError> {
@@ -232,6 +243,7 @@ mod tests {
             engine: Engine::open(data.path()).unwrap(),
             clock: Arc::new(ManualClock::new(1_000)),
             stale_after_ms: 60_000,
+            config: Config::default(),
         };
         (data, Arc::new(ctx))
     }

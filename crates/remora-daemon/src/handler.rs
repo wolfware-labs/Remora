@@ -10,6 +10,7 @@ use remora_journal::{BreakReason, CommandRecord, VerifyReport};
 use crate::worker::{Job, Reply, State};
 
 pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
+    let ctx = state.context();
     let open = state.open().map_err(engine_error)?;
     let result = match job {
         Job::BeginTurn {
@@ -107,7 +108,17 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             let at = open.at_ms();
             open.project.rewind(&point, at, force).map(rewound)
         }
-        Job::Status => open.project.status().map(|status| Response::Status { status }),
+        Job::Status => open.project.status().map(|mut status| {
+            status.retention = Some(ctx.config.retention);
+            status.config_problem.clone_from(&ctx.config.problem);
+            Response::Status { status }
+        }),
+        Job::Prune { dry_run } => {
+            let now = open.now_ms();
+            open.project
+                .prune(&ctx.config.retention, now, dry_run)
+                .map(|report| Response::Pruned { report })
+        }
         Job::Verify => open
             .project
             .journal()
@@ -201,6 +212,9 @@ pub(crate) fn engine_error(e: EngineError) -> ErrorBody {
             session: session.clone(),
         },
         EngineError::UnknownRestorePoint(_) => ErrorKind::UnknownRestorePoint,
+        EngineError::Pruned { pruned_at_ms, .. } => ErrorKind::Pruned {
+            pruned_at_ms: *pruned_at_ms,
+        },
         EngineError::RootOverlapsDataDir { .. } => ErrorKind::RootOverlapsDataDir,
         EngineError::RewindIncomplete { safety_snapshot, .. } => ErrorKind::RewindIncomplete {
             safety_snapshot: safety_snapshot.clone(),

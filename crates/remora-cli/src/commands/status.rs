@@ -51,6 +51,8 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
                 "blob_store": status.blob_store,
                 "copy_on_write": status.copy_on_write,
                 "last_snapshot_ms": last_snapshot,
+                "retention": status.retention,
+                "config_problem": status.config_problem,
             })
         );
         return Ok(());
@@ -97,6 +99,15 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
         None => "not known until the next snapshot",
     };
     println!("store  {}  ({mode})", status.blob_store.display());
+    if let Some(retention) = status.retention {
+        println!(
+            "retention  {} days  ·  {} GB per project  (`remora prune` applies it now)",
+            retention.days, retention.max_store_gb
+        );
+    }
+    if let Some(problem) = &status.config_problem {
+        println!("⚠ config invalid, the defaults apply: {problem}");
+    }
     if !status.last_unprotected.is_empty() {
         let names: Vec<_> = status
             .last_unprotected

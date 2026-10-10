@@ -138,6 +138,38 @@ fn status_shows_the_project_and_open_sessions() {
 }
 
 #[test]
+fn status_shows_the_retention_and_an_invalid_config() {
+    let s = Setup::new();
+    std::fs::write(s.data.path().join("config.toml"), "[retention]\ndays = 0\n").unwrap();
+    s.hook(&prompt(s.repo.path(), "hi"));
+
+    let text = stdout(&s.remora(&["status"]));
+
+    assert!(
+        text.contains("retention  30 days  ·  10 GB per project"),
+        "{text}"
+    );
+    assert!(
+        text.contains("config invalid") && text.contains("retention.days must be at least 1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn prune_reports_what_it_would_remove() {
+    let s = Setup::new();
+    s.hook(&prompt(s.repo.path(), "hi"));
+    s.hook(&stop(s.repo.path()));
+
+    let out = s.remora(&["prune", "--dry-run"]);
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let text = stdout(&out);
+    assert!(text.contains("nothing to prune"), "{text}");
+    assert!(text.contains("would free 0 B"), "{text}");
+}
+
+#[test]
 fn commands_without_a_daemon_say_so_with_exit_code_4() {
     let s = Setup::new();
 

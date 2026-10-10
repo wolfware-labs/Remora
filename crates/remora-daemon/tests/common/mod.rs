@@ -28,7 +28,15 @@ pub struct TestDaemon {
 
 impl TestDaemon {
     pub fn start() -> Self {
+        Self::start_with_config(None)
+    }
+
+    /// Start with `config.toml` holding `toml`.
+    pub fn start_with_config(toml: Option<&str>) -> Self {
         let data = TempDir::new().unwrap();
+        if let Some(toml) = toml {
+            fs::write(data.path().join(remora_daemon::config::CONFIG_FILE), toml).unwrap();
+        }
         let clock = ManualClock::new(START_MS);
         let daemon = Daemon::start(config(data.path(), &clock)).unwrap();
         Self {
@@ -148,6 +156,17 @@ impl TestDaemon {
     pub fn status(&self, client: &mut Client) -> remora_engine::Status {
         match client.call(Request::Status { root: self.root() }).unwrap() {
             Response::Status { status } => status,
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    pub fn prune(&self, client: &mut Client, dry_run: bool) -> remora_engine::PruneReport {
+        let request = Request::Prune {
+            root: self.root(),
+            dry_run,
+        };
+        match client.call(request).unwrap() {
+            Response::Pruned { report } => report,
             other => panic!("unexpected {other:?}"),
         }
     }

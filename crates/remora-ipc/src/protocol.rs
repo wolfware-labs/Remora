@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use remora_engine::{RestorePoint, Status};
+use remora_engine::{PruneReport, RestorePoint, Status};
 use remora_journal::CommandRecord;
 use remora_snap::SnapshotId;
 use serde::{Deserialize, Serialize};
@@ -142,6 +142,12 @@ pub enum Request {
     Verify {
         root: PathBuf,
     },
+    /// Apply the retention policy to the project now; with `dry_run`, only report.
+    Prune {
+        root: PathBuf,
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Stop the daemon after the requests already running finish. Like every request, a
     /// shutdown is accepted only after the handshake (hello, then prove);
     /// [`crate::stop_daemon`] performs it.
@@ -186,6 +192,9 @@ pub enum Response {
     },
     Verified {
         journal: JournalCheck,
+    },
+    Pruned {
+        report: PruneReport,
     },
     ShuttingDown,
 }
@@ -269,6 +278,10 @@ pub enum ErrorKind {
         session: String,
     },
     UnknownRestorePoint,
+    /// The restore point's files were removed by retention.
+    Pruned {
+        pruned_at_ms: i64,
+    },
     RootOverlapsDataDir,
     /// The rewind stopped part-way; rewinding to `safety_snapshot` undoes it.
     RewindIncomplete {
