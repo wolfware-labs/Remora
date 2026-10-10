@@ -38,8 +38,10 @@ pub fn run(ctx: &Ctx, root: &Path, target: &Target, yes: bool, force: bool) -> R
         ));
     }
     let mut client = ctx.client()?;
-    // Refuse before showing a preview the user cannot act on.
-    if !force && agent_works(&mut client, root)? {
+    // Refuse before showing a preview the user cannot act on. After a failed rollback the
+    // project answers only a restore by snapshot id, the way out: let that one through (the
+    // daemon still refuses it while a turn is open).
+    if !force && agent_works(&mut client, root, matches!(target, Target::Snapshot(_)))? {
         return Err(busy(&mut client, root));
     }
     let answer = match target {
@@ -107,13 +109,20 @@ pub fn run(ctx: &Ctx, root: &Path, target: &Target, yes: bool, force: bool) -> R
     }
 }
 
-/// Whether a turn is open in the project.
-fn agent_works(client: &mut Client, root: &Path) -> Result<bool, CliError> {
+/// Whether a turn is open in the project. For a restore by snapshot id, a project that
+/// answers only that request (its rollback failed) counts as idle.
+fn agent_works(client: &mut Client, root: &Path, by_snapshot: bool) -> Result<bool, CliError> {
     match client.call(Request::Status {
         root: root.to_path_buf(),
-    })? {
-        Response::Status { status } => Ok(!status.open_sessions.is_empty()),
-        other => Err(unexpected(&other)),
+    }) {
+        Ok(Response::Status { status }) => Ok(!status.open_sessions.is_empty()),
+        Ok(other) => Err(unexpected(&other)),
+        Err(ClientError::Daemon(body))
+            if by_snapshot && matches!(body.kind, ErrorKind::RewindIncomplete { .. }) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -146,13 +155,9 @@ fn refusal(client: &mut Client, root: &Path, e: ClientError) -> CliError {
     };
     match &body.kind {
         ErrorKind::TurnInProgress { .. } => busy(client, root),
-        ErrorKind::RewindIncomplete { safety_snapshot } => CliError::new(
-            EXIT_ERROR,
-            format!(
-                "{}\nyour files from before the rewind are kept: `remora rewind --snapshot {safety_snapshot}` brings them back",
-                body.message
-            ),
-        ),
+        ErrorKind::RewindIncomplete { safety_snapshot } => {
+            CliError::new(EXIT_ERROR, incomplete(&body.message, safety_snapshot))
+        }
         ErrorKind::UnknownRestorePoint => CliError::new(
             EXIT_ERROR,
             format!(
@@ -161,6 +166,17 @@ fn refusal(client: &mut Client, root: &Path, e: ClientError) -> CliError {
             ),
         ),
         _ => e.into(),
+    }
+}
+
+/// A rewind that did not finish, and how to get the files from before it back: once, as
+/// the message of a failed rollback already says it.
+fn incomplete(message: &str, safety: &str) -> String {
+    let hint = format!("remora rewind --snapshot {safety}");
+    if message.contains(&hint) {
+        message.to_owned()
+    } else {
+        format!("{message}\nyour files from before the rewind are kept: `{hint}` brings them back")
     }
 }
 
@@ -248,4 +264,24 @@ pub(super) fn confirm() -> Result<bool, CliError> {
         .read_line(&mut line)
         .map_err(|e| CliError::new(EXIT_ERROR, e.to_string()))?;
     Ok(matches!(line.trim(), "y" | "Y" | "yes" | "Yes"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::incomplete;
+
+    #[test]
+    fn the_way_back_is_named_once() {
+        let hint = "remora rewind --snapshot 1a2b";
+        let cut_short = incomplete(
+            "the rewind did not finish (disk full); kept as snapshot 1a2b",
+            "1a2b",
+        );
+        assert_eq!(cut_short.matches(hint).count(), 1, "{cut_short}");
+        let rolling_back = incomplete(
+            "rolling back an interrupted rewind failed (blob missing); the state before that rewind is kept as snapshot 1a2b: `remora rewind --snapshot 1a2b` restores it",
+            "1a2b",
+        );
+        assert_eq!(rolling_back.matches(hint).count(), 1, "{rolling_back}");
+    }
 }

@@ -35,6 +35,8 @@ fn removes_files_created_after_the_snapshot() {
     assert!(!fx.exists("new"));
     assert!(fx.exists("keep.txt"));
     assert_eq!(report.deleted, 3, "junk.txt, new/dir, new");
+    // Each removal is flushed with its parent; a removed folder is not flushed itself.
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
 }
 
 #[test]
@@ -203,9 +205,11 @@ fn restores_after_the_whole_project_dir_was_deleted() {
     let before = tree_state(fx.root(), EXCLUDED);
 
     fs::remove_dir_all(fx.root()).unwrap(); // the agent ran `rm -rf .`
-    snap.restore(fx.root(), &s.id).unwrap();
+    let report = snap.restore(fx.root(), &s.id).unwrap();
 
     assert_eq!(tree_state(fx.root(), EXCLUDED), before);
+    // The folders it created are flushed with their parents.
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
 }
 
 #[test]

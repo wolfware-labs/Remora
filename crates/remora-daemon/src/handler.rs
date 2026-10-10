@@ -28,6 +28,9 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
     if matches!(job, Job::Sweep) && !state.is_open() {
         return Ok(Response::Recorded);
     }
+    // The daily prune opens every recorded project: one it opened is closed again, so the
+    // daemon does not hold every project (and sweep it) for the rest of its life.
+    let close_after = matches!(job, Job::JanitorPrune) && !state.is_open();
     let job = if matches!(job, Job::JanitorPrune) {
         let recorded = ctx
             .engine
@@ -176,6 +179,9 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             .map_err(EngineError::from),
         Job::Sweep => open.sweep().map(|()| Response::Recorded),
     };
+    if close_after {
+        state.close();
+    }
     result.map_err(engine_error)
 }
 

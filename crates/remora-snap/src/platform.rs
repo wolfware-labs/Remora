@@ -177,8 +177,8 @@ mod tests {
 /// Remove every extended attribute of `path` it can (macOS; elsewhere a no-op: there clones and
 /// copies carry none Remora needs to clear). Best effort: some attributes cannot be removed by a
 /// user process (`com.apple.macl` under SIP, `com.apple.provenance`) and some filesystems have none,
-/// and the blob's contents are right either way, so a failure is logged once and never fails a
-/// snapshot.
+/// and the blob's contents are right either way, so a failure is logged once per blob and never
+/// fails a snapshot.
 #[cfg(target_os = "macos")]
 pub(crate) fn clear_xattrs(path: &Path) {
     let mut first_error = None;

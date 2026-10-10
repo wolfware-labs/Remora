@@ -384,3 +384,73 @@ fn a_socket_folder_open_to_others_is_reported_as_unsafe() {
         stderr(&out)
     );
 }
+
+#[test]
+fn after_a_failed_rollback_the_snapshot_it_names_is_restored_from_the_cli() {
+    let s = Setup::new();
+    let cwd = s.repo.path().to_path_buf();
+    s.write("a.txt", "v1");
+    s.write("b.txt", "b1");
+    assert!(s.hook(&prompt(&cwd, "first")).status.success());
+    s.write("a.txt", "v2");
+    s.write("b.txt", "b2");
+    assert!(s.hook(&stop(&cwd)).status.success());
+    assert!(s.hook(&prompt(&cwd, "second")).status.success());
+    assert!(s.hook(&stop(&cwd)).status.success());
+    let mut client = remora_ipc::Client::connect(s.data.path()).unwrap();
+    let points = match client
+        .call(remora_ipc::Request::RestorePoints {
+            root: s.root(),
+            skip: 0,
+            limit: None,
+        })
+        .unwrap()
+    {
+        remora_ipc::Response::RestorePoints { points, .. } => points,
+        other => panic!("unexpected {other:?}"),
+    };
+    let starts: Vec<_> = points
+        .into_iter()
+        .filter(|p| p.kind == remora_engine::PointKind::TurnStart)
+        .map(|p| p.snapshot)
+        .collect();
+    // Newest first: the safety snapshot holds v2/b2, the target v1/b1.
+    let (safety, target) = (starts[0].clone(), starts[1].clone());
+    drop(client);
+    s.stop_daemon();
+    // A rewind from (v2, b2) to (v1, b1) cut short after its first change, and the blob of
+    // "v2", which only the safety snapshot holds, lost: the rollback cannot finish.
+    let dir = s
+        .data
+        .path()
+        .join("projects")
+        .join(remora_engine::project_id(&s.root()));
+    let intent = dir.join(remora_engine::REWIND_FILE);
+    let record = format!(r#"{{"safety":"{safety}","target":"{target}","started_at_ms":1}}"#);
+    std::fs::write(&intent, record).unwrap();
+    s.write("a.txt", "v1");
+    for shard in std::fs::read_dir(dir.join("store").join("blobs")).unwrap() {
+        for blob in std::fs::read_dir(shard.unwrap().path()).unwrap() {
+            let blob = blob.unwrap().path();
+            if std::fs::read(&blob).unwrap() == b"v2" {
+                std::fs::remove_file(blob).unwrap();
+            }
+        }
+    }
+    // Any hook starts the daemon again; the project refuses it.
+    assert!(s.hook(&prompt(&cwd, "third")).status.success());
+    let stuck = s.remora(&["status"]);
+    assert!(
+        stderr(&stuck).contains(&format!("remora rewind --snapshot {safety}")),
+        "{}",
+        stderr(&stuck)
+    );
+
+    let restored = s.remora(&["rewind", "--snapshot", &target.to_string(), "--yes"]);
+
+    assert!(restored.status.success(), "{}", stderr(&restored));
+    assert_eq!(s.read("a.txt"), "v1");
+    assert_eq!(s.read("b.txt"), "b1", "the tree really changed");
+    assert!(!intent.exists(), "the record is gone");
+    assert!(s.remora(&["status"]).status.success());
+}

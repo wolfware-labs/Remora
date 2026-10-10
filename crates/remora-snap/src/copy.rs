@@ -98,11 +98,13 @@ impl CopySnapshotter {
         let result = (|| {
             let (hash, size) = hash_and_size(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
             let path = self.blob_path(&hash);
+            let mut new_dir = false;
             // A blob whose size is wrong (say, truncated by a crash) is replaced.
             if fs::metadata(&path).is_ok_and(|m| m.len() == size) {
                 let _ = fs::remove_file(&tmp);
             } else {
                 let blob_dir = path.parent().expect("blob path has a parent");
+                new_dir = !blob_dir.is_dir();
                 platform::create_private_dir_all(blob_dir)
                     .map_err(|e| StoreError::Store(io_at(blob_dir)(e)))?;
                 // A clone keeps the file's extended attributes (macOS quarantine flags, Finder
@@ -112,7 +114,12 @@ impl CopySnapshotter {
                 sync_file(&tmp).map_err(|e| StoreError::Store(io_at(&tmp)(e)))?;
                 fs::rename(&tmp, &path).map_err(|e| StoreError::Store(io_at(&path)(e)))?;
             }
-            Ok(Stored { hash, size, cloned })
+            Ok(Stored {
+                hash,
+                size,
+                cloned,
+                new_dir,
+            })
         })();
         if result.is_err() {
             let _ = fs::remove_file(&tmp);
@@ -252,6 +259,8 @@ struct Stored {
     hash: String,
     size: u64,
     cloned: bool,
+    /// The blob's fan-out folder was created for it.
+    new_dir: bool,
 }
 
 /// Why a file could not be stored.
@@ -293,7 +302,8 @@ impl Snapshotter for CopySnapshotter {
         let mut hashed_files = 0;
         let mut stored_files = 0;
         let mut cloned_files = 0;
-        // Blob folders renamed into, flushed once before the manifest is written.
+        // Blob folders renamed into (and the blob folder, for a fan-out folder created),
+        // flushed once before the manifest is written.
         let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
 
         for (rel, entry) in scanned.entries {
@@ -402,12 +412,16 @@ impl Snapshotter for CopySnapshotter {
                                 hash,
                                 size: stored_size,
                                 cloned,
+                                new_dir,
                             }) => {
                                 hashed_files += 1;
                                 stored_files += 1;
                                 cloned_files += usize::from(cloned);
                                 if let Some(dir) = self.blob_path(&hash).parent() {
                                     touched.insert(dir.to_path_buf());
+                                }
+                                if new_dir {
+                                    touched.insert(self.blobs.clone());
                                 }
                                 // Only cache what was stored if the file did not change since the scan,
                                 // and never while it is racy (see `statcache`).
@@ -510,6 +524,7 @@ impl Snapshotter for CopySnapshotter {
             }
         }
 
+        let new_root = !root.is_dir();
         fs::create_dir_all(root).map_err(io_at(root))?;
         let root = root.canonicalize().map_err(io_at(root))?;
         // Leave alone everything excluded now OR when the snapshot was taken: the snapshot
@@ -522,8 +537,12 @@ impl Snapshotter for CopySnapshotter {
         }
         let current = scan(&root, &opts, &self.store)?;
         let mut report = RestoreReport::default();
-        // Folders files were restored into, flushed once at the end.
+        // Folders whose entries changed (files restored into, paths removed from, folders
+        // created in), flushed once at the end.
         let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
+        if new_root && let Some(parent) = root.parent() {
+            touched.insert(parent.to_path_buf());
+        }
         // Paths whose removal failed. They (and everything under them) are never written
         // or chmod-ed: a surviving symlink would otherwise be followed outside the root.
         let mut blocked: Vec<String> = Vec::new();
@@ -541,7 +560,15 @@ impl Snapshotter for CopySnapshotter {
                 continue;
             }
             match remove_path(&entry.abs) {
-                Ok(()) => report.deleted += 1,
+                Ok(()) => {
+                    report.deleted += 1;
+                    // Children come first: a folder removed after them has nothing left to
+                    // flush, its own removal is flushed with its parent.
+                    touched.remove(&entry.abs);
+                    if let Some(dir) = entry.abs.parent() {
+                        touched.insert(dir.to_path_buf());
+                    }
+                }
                 Err(e) if e.kind() == io::ErrorKind::NotFound => {}
                 Err(e) => {
                     report.failed.push((rel.clone(), e.to_string()));
@@ -575,7 +602,15 @@ impl Snapshotter for CopySnapshotter {
                 continue;
             }
             let result = match node {
-                Node::Dir { .. } => fs::create_dir_all(&abs).map(|()| Restored::Unchanged),
+                Node::Dir { .. } => {
+                    let new_dir = !abs.is_dir();
+                    fs::create_dir_all(&abs).map(|()| {
+                        if new_dir && let Some(dir) = abs.parent() {
+                            touched.insert(dir.to_path_buf());
+                        }
+                        Restored::Unchanged
+                    })
+                }
                 Node::File { hash, mode, .. } => self.restore_file(&abs, hash, *mode),
                 Node::Symlink { target } => restore_symlink(&abs, target).map(|written| {
                     if written {
@@ -599,7 +634,8 @@ impl Snapshotter for CopySnapshotter {
             }
         }
 
-        // Restored files survive a power loss from here on (Windows journals renames itself).
+        // Restored files, removals and new folders survive a power loss from here on
+        // (Windows journals renames itself).
         #[cfg(unix)]
         for dir in &touched {
             if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {

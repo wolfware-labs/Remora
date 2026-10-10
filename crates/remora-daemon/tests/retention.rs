@@ -114,3 +114,27 @@ fn last_prune(d: &TestDaemon) -> i64 {
         .as_i64()
         .unwrap()
 }
+
+#[test]
+fn a_project_the_janitor_opened_is_closed_again() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin(&mut client, "s1", None);
+    drop(client);
+    d.stop();
+    let restarted = remora_daemon::Daemon::start(common::config(d.data.path(), &d.clock)).unwrap();
+
+    restarted.prune_if_due();
+    // Had the janitor left it open, this sweep would close the idle turn.
+    d.clock.advance(Duration::from_secs(7 * 60 * 60));
+    restarted.sweep();
+    restarted.shutdown();
+    restarted.wait();
+
+    let engine = remora_engine::Engine::open(d.data.path()).unwrap();
+    let project = engine.project(&d.root()).unwrap();
+    assert!(
+        project.journal().entries().unwrap().is_empty(),
+        "the sweep never saw the project"
+    );
+}
