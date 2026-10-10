@@ -36,7 +36,8 @@ pub(crate) fn write_private_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> 
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        sync_parent(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
@@ -69,4 +70,17 @@ pub(crate) fn open_lock_file(path: &Path) -> io::Result<fs::File> {
         options.mode(0o600);
     }
     options.open(path)
+}
+
+/// Make a rename in `path`'s folder durable: on Unix the folder itself is flushed, or a power
+/// loss could forget the rename. Windows journals rename metadata (NTFS, ReFS) and has no safe
+/// way to flush a folder.
+pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
 }

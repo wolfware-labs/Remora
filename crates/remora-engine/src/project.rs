@@ -121,7 +121,29 @@ pub struct Project {
     journal: Journal,
     last_unprotected: Vec<PathBuf>,
     copy_on_write: Option<bool>,
+    /// Something the next snapshot's caller should tell the user once (an interrupted rewind
+    /// that was rolled back when the project opened).
+    notice: Option<String>,
 }
+
+/// `rewind.json`: written before a rewind changes anything, removed once it is journaled.
+/// Finding it when a project opens means the rewind was cut short (a crash, a hard kill, a
+/// power loss): the project is rolled back to `safety`.
+#[derive(Debug, Serialize, Deserialize)]
+struct RewindIntent {
+    safety: String,
+    target: String,
+    started_at_ms: i64,
+}
+
+/// The intent record's name in the project's data folder.
+pub const REWIND_FILE: &str = "rewind.json";
+
+/// The label of the restore point an interrupted, rolled back rewind leaves.
+pub const ROLLED_BACK_LABEL: &str = "rewind interrupted, rolled back";
+
+/// What the user is told after an interrupted rewind was rolled back.
+pub const ROLLED_BACK_NOTICE: &str = "a rewind of this project was interrupted (the computer stopped or the daemon was killed) and has been rolled back: the project is as it was before that rewind. Run `remora log` to see it.";
 
 // Hand-written so the signing key inside the journal can never end up in a log.
 impl std::fmt::Debug for Project {
@@ -148,7 +170,7 @@ impl Project {
         let journal = Journal::open(&dir.join("journal.db"), key)?;
         let sessions = dir.join("sessions");
         fsutil::private_dir(&sessions).map_err(io_at(&sessions))?;
-        Ok(Self {
+        let mut project = Self {
             id,
             root,
             dir,
@@ -156,7 +178,77 @@ impl Project {
             journal,
             last_unprotected: Vec::new(),
             copy_on_write: None,
-        })
+            notice: None,
+        };
+        project.recover_interrupted_rewind()?;
+        Ok(project)
+    }
+
+    /// Roll back a rewind that was cut short: restore its safety snapshot and journal what
+    /// happened. If the rollback fails, the intent record stays and opening the project keeps
+    /// failing with `RewindIncomplete`, naming the safety snapshot to restore by hand.
+    fn recover_interrupted_rewind(&mut self) -> Result<(), EngineError> {
+        let path = self.dir.join(REWIND_FILE);
+        let intent: RewindIntent = match std::fs::read(&path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).map_err(|e| EngineError::CorruptState {
+                path: path.clone(),
+                detail: e.to_string(),
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io_at(&path)(e)),
+        };
+        let _lock = self.lock()?;
+        let incomplete = |source: EngineError| EngineError::RewindIncomplete {
+            safety_snapshot: intent.safety.clone(),
+            source: Box::new(source),
+        };
+        let safety = SnapshotId::parse(&intent.safety).map_err(|e| incomplete(e.into()))?;
+        // The half-rewound tree, so the journal can list what the rollback changed.
+        let before = self.take_snapshot().map_err(incomplete)?;
+        let report = self
+            .snap
+            .restore(&self.root, &safety)
+            .map_err(|e| incomplete(e.into()))?;
+        if let Some((path, error)) = report.failed.first() {
+            return Err(incomplete(EngineError::Io {
+                path: self.root.join(path),
+                source: std::io::Error::other(error.clone()),
+            }));
+        }
+        let changes = self
+            .take_snapshot()
+            .and_then(|after| self.changes_between(&before, &after))
+            .unwrap_or_default();
+        self.journal
+            .append(EntryRecord {
+                session_id: REWIND_SESSION.to_owned(),
+                kind: EntryKind::Rewind,
+                agent: REMORA_AGENT.to_owned(),
+                started_at_ms: intent.started_at_ms,
+                ended_at_ms: intent.started_at_ms,
+                snapshot_id: Some(intent.safety.clone()),
+                prompt: None,
+                commands: Vec::new(),
+                changes,
+                interrupted: Some(true),
+                rewind_target: Some(intent.target.clone()),
+                incomplete: None,
+            })
+            .map_err(|e| incomplete(e.into()))?;
+        std::fs::remove_file(&path).map_err(io_at(&path))?;
+        log::warn!(
+            "project {}: an interrupted rewind to {} was rolled back to {}",
+            self.root.display(),
+            intent.target,
+            intent.safety
+        );
+        self.notice = Some(ROLLED_BACK_NOTICE.to_owned());
+        Ok(())
+    }
+
+    /// Something to tell the user once, if any (see `ROLLED_BACK_NOTICE`).
+    pub fn take_notice(&mut self) -> Option<String> {
+        self.notice.take()
     }
 
     pub fn id(&self) -> &str {
@@ -426,7 +518,11 @@ impl Project {
                                 kind: PointKind::BeforeRewind,
                                 session_id: r.session_id.clone(),
                                 at_ms: r.started_at_ms,
-                                label: r.rewind_target.clone(),
+                                label: if r.interrupted == Some(true) {
+                                    Some(ROLLED_BACK_LABEL.to_owned())
+                                } else {
+                                    r.rewind_target.clone()
+                                },
                                 open: false,
                                 late: false,
                             }),
@@ -569,6 +665,17 @@ impl Project {
         at_ms: i64,
     ) -> Result<RewindReport, EngineError> {
         let safety = self.take_snapshot()?;
+        // Before anything changes: a crash from here until this rewind returns is rolled back
+        // to the safety snapshot when the project next opens. Once it returns, the caller has
+        // the safety snapshot either way, so the record goes.
+        let intent_path = self.dir.join(REWIND_FILE);
+        let intent = serde_json::to_vec(&RewindIntent {
+            safety: safety.to_string(),
+            target: target.to_string(),
+            started_at_ms: at_ms,
+        })
+        .expect("the intent record serializes");
+        fsutil::write_private_atomic(&intent_path, &intent).map_err(io_at(&intent_path))?;
         // From here on the project may change, so every failure carries the safety
         // snapshot: the rewind can always be undone.
         let incomplete = |source: EngineError| EngineError::RewindIncomplete {
@@ -578,6 +685,10 @@ impl Project {
         let restore = self.snap.restore(&self.root, target);
         let restored_cleanly = matches!(&restore, Ok(r) if r.failed.is_empty());
         let entry = self.journal_rewind(&safety, target, at_ms, restored_cleanly);
+        if let Err(e) = std::fs::remove_file(&intent_path) {
+            // Left in place, it would roll this rewind back at the next open.
+            return Err(incomplete(io_at(&intent_path)(e)));
+        }
         match (restore, entry) {
             (Ok(restore), Ok(entry)) => Ok(RewindReport {
                 restore,

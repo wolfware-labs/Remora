@@ -211,8 +211,18 @@ fn every_response_has_a_stable_wire_form() {
     );
     ok(Response::Authenticated, json!({"type": "authenticated"}));
     ok(
-        Response::Snapshot { snapshot: snap('b') },
+        Response::Snapshot {
+            snapshot: snap('b'),
+            notice: None,
+        },
         json!({"type": "snapshot", "snapshot": "b".repeat(64)}),
+    );
+    ok(
+        Response::Snapshot {
+            snapshot: snap('b'),
+            notice: Some("rolled back".into()),
+        },
+        json!({"type": "snapshot", "snapshot": "b".repeat(64), "notice": "rolled back"}),
     );
     ok(Response::Recorded, json!({"type": "recorded"}));
     ok(

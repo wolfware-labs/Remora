@@ -106,6 +106,52 @@ fn a_session_is_recorded_and_its_commands_paired_by_tool_use_id() {
 }
 
 #[test]
+fn a_rewind_rolled_back_at_start_is_told_once_per_session() {
+    let mut h = Hooks::with_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+    h.setup.write("a.txt", "kept");
+    h.send(&prompt(&cwd, "edit"));
+    h.send(&stop(&cwd));
+    let point = match h
+        .client()
+        .call(Request::RestorePoints {
+            root: h.setup.root(),
+            skip: 0,
+            limit: None,
+        })
+        .unwrap()
+    {
+        Response::RestorePoints { mut points, .. } => points.remove(0),
+        other => panic!("unexpected {other:?}"),
+    };
+    // The daemon died in the middle of a rewind: the record is there, the tree half changed.
+    let daemon = h.daemon.take().unwrap();
+    daemon.shutdown();
+    daemon.wait();
+    let dir = h
+        .setup
+        .data
+        .path()
+        .join("projects")
+        .join(remora_engine::project_id(&h.setup.root()));
+    let intent = json!({ "safety": point.snapshot, "target": point.snapshot, "started_at_ms": 1 });
+    std::fs::write(dir.join(remora_engine::REWIND_FILE), intent.to_string()).unwrap();
+    h.setup.write("a.txt", "half rewound");
+    h.daemon = Some(Daemon::start(DaemonConfig::new(h.setup.data.path())).unwrap());
+
+    let first = h.send(&prompt(&cwd, "next")).unwrap();
+    let second = h.send(&before_bash(&cwd, "ls", "toolu_1"));
+
+    let message: serde_json::Value = serde_json::from_str(&first).unwrap();
+    assert_eq!(
+        message["systemMessage"].as_str().unwrap(),
+        format!("Remora: {}", remora_engine::ROLLED_BACK_NOTICE)
+    );
+    assert_eq!(second, None, "once per session");
+    assert_eq!(h.setup.read("a.txt"), "kept");
+}
+
+#[test]
 fn a_subfolder_records_into_its_repository() {
     let h = Hooks::with_daemon();
     h.setup.write("src/lib.rs", "");

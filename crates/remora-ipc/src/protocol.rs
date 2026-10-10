@@ -157,9 +157,12 @@ pub enum Response {
     },
     /// The client's proof was accepted.
     Authenticated,
-    /// `begin_turn` and `before_command`: the snapshot just taken.
+    /// `begin_turn` and `before_command`: the snapshot just taken, and something to tell the
+    /// user once (an interrupted rewind that was rolled back), if any.
     Snapshot {
         snapshot: SnapshotId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        notice: Option<String>,
     },
     /// `after_command`.
     Recorded,

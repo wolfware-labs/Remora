@@ -11,7 +11,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime};
 
 use remora_daemon::{LOG_ROTATE_BYTES, LogFile};
-use remora_ipc::{Client, ClientError, ErrorKind, Request};
+use remora_ipc::{Client, ClientError, ErrorKind, Request, Response};
 
 use crate::claude::{self, AGENT, HookEvent};
 use crate::root::{self, Root};
@@ -122,6 +122,16 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
             .call(with_deadline(request, epoch_ms(SystemTime::now() + wait)))
     });
     match answer {
+        // Something the user should hear once per session (an interrupted rewind that was
+        // rolled back).
+        Ok(Response::Snapshot {
+            notice: Some(notice), ..
+        }) => {
+            note(&format!("session {session}: {notice}"));
+            Markers::new(&env.data_dir, "hook-warnings")
+                .first(&format!("{session}.notice"))
+                .then(|| system_message(&format!("Remora: {notice}")))
+        }
         Ok(_) => None,
         Err(e) => {
             note(&format!("session {session}: {e}"));

@@ -329,7 +329,7 @@ fn a_turn_whose_snapshot_was_lost_does_not_lock_the_project() {
     let d = TestDaemon::start();
     d.write("a.txt", "v1");
     let mut client = d.client();
-    let Response::Snapshot { snapshot } = d.begin(&mut client, "s1", None) else {
+    let Response::Snapshot { snapshot, .. } = d.begin(&mut client, "s1", None) else {
         panic!("expected a snapshot");
     };
     d.write("a.txt", "v2");

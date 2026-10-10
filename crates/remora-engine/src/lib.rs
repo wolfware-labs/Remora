@@ -30,8 +30,8 @@ mod winuser;
 pub use engine::{Engine, default_data_dir, project_id};
 pub use error::EngineError;
 pub use project::{
-    MAX_LABEL_BYTES, PointKind, Preview, Project, REMORA_AGENT, REWIND_SESSION, RestorePoint, RewindReport,
-    Status, short_label,
+    MAX_LABEL_BYTES, PointKind, Preview, Project, REMORA_AGENT, REWIND_FILE, REWIND_SESSION,
+    ROLLED_BACK_LABEL, ROLLED_BACK_NOTICE, RestorePoint, RewindReport, Status, short_label,
 };
 pub use session::SessionRef;
 pub use winuser::user_sid;

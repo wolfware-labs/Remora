@@ -95,6 +95,19 @@ pub(crate) fn set_private(path: &Path) -> io::Result<()> {
     fs::set_permissions(path, permissions)
 }
 
+/// Make a rename in `path`'s folder durable: on Unix the folder itself is flushed, or a power
+/// loss could forget the rename. Windows journals rename metadata (NTFS, ReFS) and has no safe
+/// way to flush a folder.
+pub(crate) fn sync_parent(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    if let Some(dir) = path.parent() {
+        fs::File::open(dir)?.sync_all()?;
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+    Ok(())
+}
+
 /// Modification time in nanoseconds since the Unix epoch, if the platform reports one.
 pub(crate) fn mtime_ns(meta: &Metadata) -> Option<u64> {
     let since_epoch = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;

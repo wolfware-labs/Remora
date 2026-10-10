@@ -16,7 +16,10 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
             let at = open.at_ms();
             open.project
                 .begin_turn(&session, prompt.as_deref(), at)
-                .map(|snapshot| Response::Snapshot { snapshot })
+                .map(|snapshot| Response::Snapshot {
+                    snapshot,
+                    notice: open.project.take_notice(),
+                })
         }
         Job::BeforeCommand {
             session,
@@ -39,7 +42,10 @@ pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
                             log::warn!("session {}: could not mark the checkpoint late: {e}", session.id);
                         }
                     }
-                    Response::Snapshot { snapshot }
+                    Response::Snapshot {
+                        snapshot,
+                        notice: open.project.take_notice(),
+                    }
                 })
         }
         Job::AfterCommand {

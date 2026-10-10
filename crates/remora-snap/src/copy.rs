@@ -11,6 +11,7 @@
 //! Files go into and come out of the blob store by cloning (copy-on-write: APFS, btrfs,
 //! XFS, ReFS) where the filesystem can, else by copying, one file at a time.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -196,6 +197,8 @@ impl Snapshotter for CopySnapshotter {
         let mut hashed_files = 0;
         let mut stored_files = 0;
         let mut cloned_files = 0;
+        // Blob folders renamed into, flushed once before the manifest is written.
+        let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
 
         for (rel, entry) in scanned.entries {
             let node = match entry.kind {
@@ -307,6 +310,9 @@ impl Snapshotter for CopySnapshotter {
                                 hashed_files += 1;
                                 stored_files += 1;
                                 cloned_files += usize::from(cloned);
+                                if let Some(dir) = self.blob_path(&hash).parent() {
+                                    touched.insert(dir.to_path_buf());
+                                }
                                 // Only cache what was stored if the file did not change since the scan,
                                 // and never while it is racy (see `statcache`).
                                 if let Some(mtime_ns) = mtime_ns
@@ -344,6 +350,14 @@ impl Snapshotter for CopySnapshotter {
             manifest.nodes.insert(rel, node);
         }
 
+        // A manifest must never name a blob whose rename a power loss could undo (Windows
+        // journals renames itself and cannot open a folder this way).
+        #[cfg(unix)]
+        for dir in &touched {
+            File::open(dir).and_then(|d| d.sync_all()).map_err(io_at(dir))?;
+        }
+        #[cfg(not(unix))]
+        let _ = &touched;
         let json = serde_json::to_vec(&manifest).expect("manifest always serializes");
         let id = SnapshotId::parse(&hash_bytes(&json))?;
         let path = self.manifest_path(&id);
@@ -412,6 +426,8 @@ impl Snapshotter for CopySnapshotter {
         }
         let current = scan(&root, &opts, &self.store)?;
         let mut report = RestoreReport::default();
+        // Folders files were restored into, flushed once at the end.
+        let mut touched: BTreeSet<PathBuf> = BTreeSet::new();
         // Paths whose removal failed. They (and everything under them) are never written
         // or chmod-ed: a surviving symlink would otherwise be followed outside the root.
         let mut blocked: Vec<String> = Vec::new();
@@ -478,11 +494,24 @@ impl Snapshotter for CopySnapshotter {
                 Ok(Restored::Written { cloned }) => {
                     report.written += 1;
                     report.cloned += usize::from(cloned);
+                    if let Some(dir) = abs.parent() {
+                        touched.insert(dir.to_path_buf());
+                    }
                 }
                 Ok(Restored::Unchanged) => {}
                 Err(e) => report.failed.push((rel.clone(), e.to_string())),
             }
         }
+
+        // Restored files survive a power loss from here on (Windows journals renames itself).
+        #[cfg(unix)]
+        for dir in &touched {
+            if let Err(e) = File::open(dir).and_then(|d| d.sync_all()) {
+                report.failed.push((dir.display().to_string(), e.to_string()));
+            }
+        }
+        #[cfg(not(unix))]
+        let _ = &touched;
 
         // 3. Directory modes last, children first, so a read-only dir never blocks a write.
         for (rel, node) in manifest.nodes.iter().rev() {
@@ -598,7 +627,8 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
         file.write_all(bytes)?;
         file.sync_all()?;
         drop(file);
-        fs::rename(&tmp, path)
+        fs::rename(&tmp, path)?;
+        platform::sync_parent(path)
     })();
     if result.is_err() {
         let _ = fs::remove_file(&tmp);
