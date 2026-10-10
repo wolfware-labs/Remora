@@ -78,6 +78,20 @@ impl TestDaemon {
                 session: session.into(),
                 agent: "claude-code".into(),
                 prompt: prompt.map(Into::into),
+                deadline_ms: None,
+            })
+            .unwrap()
+    }
+
+    /// `begin` from a hook that gives up waiting at `deadline_ms`.
+    pub fn begin_by(&self, client: &mut Client, session: &str, deadline_ms: i64) -> Response {
+        client
+            .call(Request::BeginTurn {
+                root: self.root(),
+                session: session.into(),
+                agent: "claude-code".into(),
+                prompt: Some("build".into()),
+                deadline_ms: Some(deadline_ms),
             })
             .unwrap()
     }

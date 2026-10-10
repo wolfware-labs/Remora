@@ -233,3 +233,23 @@ fn a_checkpoint_finished_after_the_hook_gave_up_is_marked_late() {
     let late: Vec<_> = d.points(&mut client).iter().map(|p| p.late).collect();
     assert_eq!(late, [true, false, false], "newest first: rm (late), make, turn");
 }
+
+#[test]
+fn a_turn_start_finished_after_the_hook_gave_up_is_marked_late() {
+    let d = TestDaemon::start();
+    let mut client = d.client();
+    d.begin_by(&mut client, "s1", START_MS + 60_000);
+    d.end(&mut client, "s1");
+    d.clock.advance(Duration::from_secs(120));
+    d.begin_by(&mut client, "s1", START_MS + 60_000);
+
+    let late: Vec<_> = d.points(&mut client).iter().map(|p| p.late).collect();
+    assert_eq!(
+        late,
+        [true, false],
+        "newest first: the second start (late), the first"
+    );
+    d.end(&mut client, "s1");
+    let late: Vec<_> = d.points(&mut client).iter().map(|p| p.late).collect();
+    assert_eq!(late, [true, false], "still labelled once journaled");
+}

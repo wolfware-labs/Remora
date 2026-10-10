@@ -18,6 +18,7 @@ pub(crate) enum Job {
     BeginTurn {
         session: SessionRef,
         prompt: Option<String>,
+        deadline_ms: Option<i64>,
     },
     BeforeCommand {
         session: SessionRef,

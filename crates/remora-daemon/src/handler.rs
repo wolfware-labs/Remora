@@ -12,13 +12,30 @@ use crate::worker::{Job, Reply, State};
 pub(crate) fn execute(state: &mut State, job: Job) -> Reply {
     let open = state.open().map_err(engine_error)?;
     let result = match job {
-        Job::BeginTurn { session, prompt } => {
+        Job::BeginTurn {
+            session,
+            prompt,
+            deadline_ms,
+        } => {
             let at = open.at_ms();
             open.project
                 .begin_turn(&session, prompt.as_deref(), at)
-                .map(|snapshot| Response::Snapshot {
-                    snapshot,
-                    notice: open.project.take_notice(),
+                .map(|snapshot| {
+                    // The agent stopped waiting before the start snapshot was ready: the turn
+                    // may already have changed files.
+                    if deadline_ms.is_some_and(|deadline| open.now_ms() > deadline) {
+                        log::warn!(
+                            "session {}: a turn's start snapshot finished after the agent's deadline, marked late",
+                            session.id
+                        );
+                        if let Err(e) = open.project.mark_turn_start_late(&session) {
+                            log::warn!("session {}: could not mark the turn start late: {e}", session.id);
+                        }
+                    }
+                    Response::Snapshot {
+                        snapshot,
+                        notice: open.project.take_notice(),
+                    }
                 })
         }
         Job::BeforeCommand {

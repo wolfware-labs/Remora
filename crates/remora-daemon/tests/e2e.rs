@@ -109,6 +109,7 @@ fn engine_refusals_reach_the_client_with_their_kind() {
         session: "../escape".into(),
         agent: "claude-code".into(),
         prompt: None,
+        deadline_ms: None,
     });
     assert!(matches!(bad_session, Err(ClientError::Daemon(e)) if e.kind == ErrorKind::InvalidSessionId));
 }
@@ -144,6 +145,7 @@ fn a_deleted_project_reached_through_a_symlink_is_still_found() {
             session: s,
             agent,
             prompt: None,
+            deadline_ms: None,
         })
         .unwrap();
 
@@ -353,6 +355,7 @@ fn a_turn_whose_snapshot_was_lost_does_not_lock_the_project() {
         session: "s2".into(),
         agent: "claude-code".into(),
         prompt: None,
+        deadline_ms: None,
     });
     restarted.shutdown();
     restarted.wait();

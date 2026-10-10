@@ -322,6 +322,53 @@ fn marking_without_an_id_labels_the_latest_command_and_an_unknown_id_nothing() {
 }
 
 #[test]
+fn a_late_turn_start_is_labelled_in_the_journal_and_its_restore_point() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.begin_turn(&agent(), Some("build"), 1_000).unwrap();
+    p.before_command(&agent(), "make", None, 1_100).unwrap();
+
+    p.mark_turn_start_late(&agent()).unwrap();
+
+    let late: Vec<_> = p.restore_points().unwrap().iter().map(|pt| pt.late).collect();
+    assert_eq!(late, [false, true], "newest first: make, turn start (late)");
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+    assert_eq!(entry.record.late_start, Some(true));
+    assert_eq!(entry.record.commands[0].late, None);
+    let late: Vec<_> = p.restore_points().unwrap().iter().map(|pt| pt.late).collect();
+    assert_eq!(late, [false, true], "still labelled once journaled");
+    p.mark_turn_start_late(&agent()).unwrap(); // no open turn: nothing to mark, no error
+}
+
+#[test]
+fn a_late_command_that_opened_its_turn_makes_the_turn_start_late_too() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    p.before_command(&agent(), "make", None, 1_000).unwrap();
+
+    p.mark_late(&agent(), None).unwrap();
+
+    let late: Vec<_> = p.restore_points().unwrap().iter().map(|pt| pt.late).collect();
+    assert_eq!(late, [true, true], "the command and the turn it opened");
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+    assert_eq!(entry.record.late_start, Some(true));
+}
+
+#[test]
+fn a_late_command_in_a_started_turn_leaves_the_turn_start_alone() {
+    let fx = Fixture::new();
+    let mut p = fx.open();
+    // No prompt and no change: the command's checkpoint is the turn's start snapshot.
+    p.begin_turn(&agent(), None, 1_000).unwrap();
+    p.before_command(&agent(), "make", None, 1_100).unwrap();
+
+    p.mark_late(&agent(), None).unwrap();
+
+    let entry = p.end_turn(&agent(), 2_000).unwrap().unwrap();
+    assert_eq!(entry.record.late_start, None);
+}
+
+#[test]
 fn ending_a_session_closes_its_open_turn_as_interrupted() {
     let fx = Fixture::new();
     let mut p = fx.open();

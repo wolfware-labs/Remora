@@ -72,6 +72,7 @@ fn turn(client: &mut Client, root: &Path, change: impl FnOnce()) {
         session: "s1".into(),
         agent: "claude-code".into(),
         prompt: Some("rewrite everything".into()),
+        deadline_ms: None,
     };
     assert!(matches!(client.call(begin), Ok(Response::Snapshot { .. })));
     change();

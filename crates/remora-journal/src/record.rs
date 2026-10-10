@@ -85,4 +85,8 @@ pub struct EntryRecord {
     /// actually changed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub incomplete: Option<bool>,
+    /// For `Turn` entries: the turn's start snapshot finished after the agent stopped
+    /// waiting for it, so it may include the turn's first changes. Format 2 and later.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late_start: Option<bool>,
 }

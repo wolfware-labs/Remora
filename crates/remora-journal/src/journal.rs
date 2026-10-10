@@ -5,8 +5,9 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, Row, TransactionBehavio
 
 use crate::{EntryKind, EntryRecord, GENESIS_HASH, JournalError, compute_hash, private};
 
-/// The on-disk format version, stored in SQLite's `user_version`.
-pub const FORMAT_VERSION: i64 = 1;
+/// The on-disk format version, stored in SQLite's `user_version`. Format 2 added the
+/// `late_start` column; a format 1 journal is migrated when it is opened for writing.
+pub const FORMAT_VERSION: i64 = 2;
 
 /// Signatures cover this prefix followed by the entry hash, so a signature made for
 /// another purpose (or another format version) can never verify as a journal entry.
@@ -29,12 +30,21 @@ CREATE TABLE IF NOT EXISTS entries (
     incomplete    INTEGER,
     prev_hash     TEXT    NOT NULL,
     hash          TEXT    NOT NULL,
-    signature     TEXT    NOT NULL
+    signature     TEXT    NOT NULL,
+    late_start    INTEGER
 );";
 
+/// Format 1 to 2: a column added at the end, so every existing row reads it as NULL.
+const MIGRATE_1_TO_2: &str = "ALTER TABLE entries ADD COLUMN late_start INTEGER;";
+
 const SELECT_ALL: &str = "SELECT seq, session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
-    prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature
-    FROM entries ORDER BY seq";
+    prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature,
+    late_start FROM entries ORDER BY seq";
+
+/// A format 1 journal opened read-only has no `late_start` column.
+const SELECT_ALL_V1: &str = "SELECT seq, session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
+    prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature,
+    NULL FROM entries ORDER BY seq";
 
 /// A stored journal entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -80,6 +90,8 @@ pub struct Journal {
 /// A journal opened read-only, for inspection and verification without the private key.
 pub struct ReadOnlyJournal {
     conn: Connection,
+    /// The query reading every entry, for the journal's format.
+    select_all: &'static str,
 }
 
 /// One row as stored, before decoding.
@@ -100,6 +112,7 @@ struct RawRow {
     prev_hash: String,
     hash: String,
     signature: String,
+    late_start: Option<bool>,
 }
 
 impl RawRow {
@@ -121,6 +134,7 @@ impl RawRow {
             prev_hash: row.get(13)?,
             hash: row.get(14)?,
             signature: row.get(15)?,
+            late_start: row.get(16)?,
         })
     }
 
@@ -138,6 +152,7 @@ impl RawRow {
             interrupted: self.interrupted,
             rewind_target: self.rewind_target.clone(),
             incomplete: self.incomplete,
+            late_start: self.late_start,
         })
     }
 }
@@ -146,20 +161,16 @@ fn signing_message(hash: &str) -> Vec<u8> {
     [SIGNING_DOMAIN, hash.as_bytes()].concat()
 }
 
-fn check_version(conn: &Connection) -> Result<(), JournalError> {
-    let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version == FORMAT_VERSION {
-        Ok(())
-    } else {
-        Err(JournalError::UnsupportedVersion(version))
-    }
+fn format_version(conn: &Connection) -> Result<i64, JournalError> {
+    Ok(conn.query_row("PRAGMA user_version", [], |r| r.get(0))?)
 }
 
 impl Journal {
     /// Open (or create) the journal database at `path`, signing new entries with `key`.
     ///
     /// The file is created owner-only; an existing file with loose permissions is tightened.
-    /// A database written by another format version is refused.
+    /// A format 1 journal is migrated to the current format in one transaction (a failed
+    /// migration leaves it untouched); any other format is refused.
     pub fn open(path: &Path, key: SigningKey) -> Result<Self, JournalError> {
         let io_err = |source| JournalError::Io {
             path: path.to_path_buf(),
@@ -180,18 +191,28 @@ impl Journal {
         if version == 0 && !has_table {
             tx.execute_batch(SCHEMA)?;
             tx.execute_batch(&format!("PRAGMA user_version = {FORMAT_VERSION}"))?;
+        } else if version == 1 {
+            tx.execute_batch(MIGRATE_1_TO_2)?;
+            tx.execute_batch("PRAGMA user_version = 2")?;
         }
         tx.commit()?;
-        check_version(&conn)?;
-        Ok(Self { conn, key })
+        match format_version(&conn)? {
+            FORMAT_VERSION => Ok(Self { conn, key }),
+            other => Err(JournalError::UnsupportedVersion(other)),
+        }
     }
 
-    /// Open an existing journal read-only. Never creates or modifies anything.
+    /// Open an existing journal read-only. Never creates or modifies anything, so a format 1
+    /// journal is read as it is.
     pub fn open_read_only(path: &Path) -> Result<ReadOnlyJournal, JournalError> {
         let flags = OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX;
         let conn = Connection::open_with_flags(path, flags)?;
-        check_version(&conn)?;
-        Ok(ReadOnlyJournal { conn })
+        let select_all = match format_version(&conn)? {
+            1 => SELECT_ALL_V1,
+            FORMAT_VERSION => SELECT_ALL,
+            other => return Err(JournalError::UnsupportedVersion(other)),
+        };
+        Ok(ReadOnlyJournal { conn, select_all })
     }
 
     /// Hex-encoded public key that verifies this journal's signatures.
@@ -215,8 +236,9 @@ impl Journal {
         let signature = hex::encode(self.key.sign(&signing_message(&hash)).to_bytes());
         tx.execute(
             "INSERT INTO entries (session_id, kind, agent, started_at_ms, ended_at_ms, snapshot_id,
-                prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+                prompt, commands, changes, interrupted, rewind_target, incomplete, prev_hash, hash, signature,
+                late_start)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
             params![
                 record.session_id,
                 record.kind.as_str(),
@@ -233,6 +255,7 @@ impl Journal {
                 prev_hash,
                 hash,
                 signature,
+                record.late_start,
             ],
         )?;
         let seq = tx.last_insert_rowid();
@@ -248,30 +271,30 @@ impl Journal {
 
     /// All entries in order.
     pub fn entries(&self) -> Result<Vec<Entry>, JournalError> {
-        read_entries(&self.conn)
+        read_entries(&self.conn, SELECT_ALL)
     }
 
     /// Verify the chain with this journal's own key. See [`ReadOnlyJournal::verify_with`].
     pub fn verify(&self) -> Result<VerifyReport, JournalError> {
-        verify_chain(&self.conn, &self.key.verifying_key())
+        verify_chain(&self.conn, SELECT_ALL, &self.key.verifying_key())
     }
 }
 
 impl ReadOnlyJournal {
     /// All entries in order.
     pub fn entries(&self) -> Result<Vec<Entry>, JournalError> {
-        read_entries(&self.conn)
+        read_entries(&self.conn, self.select_all)
     }
 
     /// Walk the chain from the start and report the first broken entry, if any, checking
     /// signatures against `key`. Never modifies the journal: a broken chain is evidence.
     pub fn verify_with(&self, key: &VerifyingKey) -> Result<VerifyReport, JournalError> {
-        verify_chain(&self.conn, key)
+        verify_chain(&self.conn, self.select_all, key)
     }
 }
 
-fn read_entries(conn: &Connection) -> Result<Vec<Entry>, JournalError> {
-    let mut stmt = conn.prepare(SELECT_ALL)?;
+fn read_entries(conn: &Connection, select_all: &str) -> Result<Vec<Entry>, JournalError> {
+    let mut stmt = conn.prepare(select_all)?;
     let rows = stmt.query_map([], RawRow::from_row)?;
     let mut out = Vec::new();
     for row in rows {
@@ -290,8 +313,12 @@ fn read_entries(conn: &Connection) -> Result<Vec<Entry>, JournalError> {
     Ok(out)
 }
 
-fn verify_chain(conn: &Connection, verifying_key: &VerifyingKey) -> Result<VerifyReport, JournalError> {
-    let mut stmt = conn.prepare(SELECT_ALL)?;
+fn verify_chain(
+    conn: &Connection,
+    select_all: &str,
+    verifying_key: &VerifyingKey,
+) -> Result<VerifyReport, JournalError> {
+    let mut stmt = conn.prepare(select_all)?;
     // `seq` is the rowid, so it is always an integer; the other columns may hold any SQLite type.
     let rows = stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, RawRow::from_row(r))))?;
     let mut expected_prev = GENESIS_HASH.to_owned();

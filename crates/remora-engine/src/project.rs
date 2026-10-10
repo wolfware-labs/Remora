@@ -233,6 +233,7 @@ impl Project {
                 interrupted: Some(true),
                 rewind_target: Some(intent.target.clone()),
                 incomplete: None,
+                late_start: None,
             })
             .map_err(|e| incomplete(e.into()))?;
         std::fs::remove_file(&path).map_err(io_at(&path))?;
@@ -304,6 +305,7 @@ impl Project {
             pre_snapshot: pre.to_string(),
             commands: Vec::new(),
             last_event_ms: Some(at_ms),
+            late_start: None,
         };
         session::save(&path, &turn)?;
         Ok(pre)
@@ -332,6 +334,7 @@ impl Project {
                 pre_snapshot: checkpoint.to_string(),
                 commands: Vec::new(),
                 last_event_ms: None,
+                late_start: None,
             },
         };
         turn.commands.push(CommandRecord {
@@ -404,8 +407,30 @@ impl Project {
             };
             if let Some(command) = command {
                 command.late = Some(true);
+                // A command that opened its turn implicitly shares its checkpoint with the
+                // turn's start: that start is late too.
+                let opened_turn = turn.prompt.is_none()
+                    && command.at_ms == Some(turn.started_at_ms)
+                    && command.snapshot_id.as_deref() == Some(turn.pre_snapshot.as_str());
+                if opened_turn {
+                    turn.late_start = Some(true);
+                }
                 session::save(&path, &turn)?;
             }
+        }
+        Ok(())
+    }
+
+    /// Mark the start of the session's open turn as late: its snapshot finished after the
+    /// agent stopped waiting, so it may include the turn's first changes. Ignored if no turn
+    /// is open.
+    pub fn mark_turn_start_late(&mut self, session: &SessionRef) -> Result<(), EngineError> {
+        session::check_session_id(&session.id)?;
+        let _lock = self.lock()?;
+        let path = session::path_for(&self.sessions_dir(), &session.id);
+        if let Some(mut turn) = session::load(&path)? {
+            turn.late_start = Some(true);
+            session::save(&path, &turn)?;
         }
         Ok(())
     }
@@ -468,6 +493,7 @@ impl Project {
             interrupted: interrupted.then_some(true),
             rewind_target: None,
             incomplete,
+            late_start: turn.late_start,
         })?;
         session::remove(&session::path_for(&self.sessions_dir(), &turn.session_id))?;
         Ok(entry)
@@ -506,6 +532,7 @@ impl Project {
                         prompt: r.prompt.as_deref(),
                         commands: &r.commands,
                         open: false,
+                        late_start: r.late_start == Some(true),
                     },
                 )?,
                 EntryKind::Rewind => {
@@ -541,6 +568,7 @@ impl Project {
                     prompt: turn.prompt.as_deref(),
                     commands: &turn.commands,
                     open: true,
+                    late_start: turn.late_start == Some(true),
                 },
             )?;
         }
@@ -731,6 +759,7 @@ impl Project {
             interrupted: None,
             rewind_target: Some(target.to_string()),
             incomplete: (!complete).then_some(true),
+            late_start: None,
         })?)
     }
 
@@ -785,6 +814,7 @@ struct TurnView<'a> {
     prompt: Option<&'a str>,
     commands: &'a [CommandRecord],
     open: bool,
+    late_start: bool,
 }
 
 fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), EngineError> {
@@ -804,7 +834,13 @@ fn push_turn(events: &mut Vec<(i64, Item)>, turn: &TurnView<'_>) -> Result<(), E
     if let Some(pre) = turn.pre_snapshot {
         events.push((
             turn.at_ms,
-            point(turn.at_ms, pre, PointKind::TurnStart, turn.prompt, false)?,
+            point(
+                turn.at_ms,
+                pre,
+                PointKind::TurnStart,
+                turn.prompt,
+                turn.late_start,
+            )?,
         ));
     }
     for cmd in turn.commands {

@@ -73,8 +73,10 @@ fn every_request_has_a_stable_wire_form() {
             session: "s1".into(),
             agent: "claude-code".into(),
             prompt: Some("fix it".into()),
+            deadline_ms: Some(1_700_000_000_000),
         },
-        json!({"type": "begin_turn", "root": "/home/me/proj", "session": "s1", "agent": "claude-code", "prompt": "fix it"}),
+        json!({"type": "begin_turn", "root": "/home/me/proj", "session": "s1", "agent": "claude-code", "prompt": "fix it",
+               "deadline_ms": 1_700_000_000_000_i64}),
     );
     request(
         Request::BeginTurn {
@@ -82,6 +84,7 @@ fn every_request_has_a_stable_wire_form() {
             session: "s1".into(),
             agent: "claude-code".into(),
             prompt: None,
+            deadline_ms: None,
         },
         json!({"type": "begin_turn", "root": "/home/me/proj", "session": "s1", "agent": "claude-code"}),
     );

@@ -53,6 +53,9 @@ pub(crate) struct OpenTurn {
     /// When the turn last saw an event. Absent in files written before it existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_event_ms: Option<i64>,
+    /// The start snapshot finished after the agent stopped waiting for it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub late_start: Option<bool>,
 }
 
 impl OpenTurn {

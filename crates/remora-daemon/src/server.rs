@@ -276,11 +276,13 @@ impl Shared {
                 session,
                 agent,
                 prompt,
+                deadline_ms,
             } => self.run(
                 &root,
                 Job::BeginTurn {
                     session: SessionRef::new(session, agent),
                     prompt,
+                    deadline_ms,
                 },
             ),
             Request::BeforeCommand {

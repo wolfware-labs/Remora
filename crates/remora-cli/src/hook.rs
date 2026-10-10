@@ -161,6 +161,7 @@ fn to_request(event: HookEvent, root: PathBuf) -> Option<Request> {
             session,
             agent,
             prompt: Some(prompt).filter(|p| !p.is_empty()),
+            deadline_ms: None,
         },
         HookEvent::BeforeBash {
             session,
@@ -202,10 +203,11 @@ fn epoch_ms(at: SystemTime) -> i64 {
 }
 
 /// `request` with the time this hook stops waiting for it, for requests that take one:
-/// a checkpoint the daemon finishes later may already contain the command's effects, so
-/// the daemon marks it late.
+/// a snapshot the daemon finishes later may already contain the agent's changes, so the
+/// daemon marks it late.
 fn with_deadline(mut request: Request, at_ms: i64) -> Request {
-    if let Request::BeforeCommand { deadline_ms, .. } = &mut request {
+    if let Request::BeginTurn { deadline_ms, .. } | Request::BeforeCommand { deadline_ms, .. } = &mut request
+    {
         *deadline_ms = Some(at_ms);
     }
     request
@@ -397,7 +399,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn with_deadline_sets_deadline_ms_on_before_command_and_leaves_others_unchanged() {
+    fn with_deadline_sets_deadline_ms_on_snapshotting_requests_and_leaves_others_unchanged() {
         let path = PathBuf::from("/tmp");
         let before_cmd = Request::BeforeCommand {
             root: path.clone(),
@@ -415,6 +417,18 @@ mod tests {
         } else {
             panic!("expected BeforeCommand");
         }
+
+        let begin_turn = Request::BeginTurn {
+            root: path.clone(),
+            session: "s1".into(),
+            agent: "test".into(),
+            prompt: None,
+            deadline_ms: None,
+        };
+        let Request::BeginTurn { deadline_ms, .. } = with_deadline(begin_turn, deadline) else {
+            panic!("expected BeginTurn");
+        };
+        assert_eq!(deadline_ms, Some(deadline));
 
         let end_turn = Request::EndTurn {
             root: path,

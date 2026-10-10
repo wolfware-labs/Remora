@@ -63,12 +63,16 @@ pub enum Request {
     Prove {
         proof: String,
     },
+    /// `deadline_ms` works as for `before_command`: a start snapshot finished later is
+    /// marked late.
     BeginTurn {
         root: PathBuf,
         session: String,
         agent: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<i64>,
     },
     /// `tool_use_id`, when the agent has one, pairs the command with its `after_command`.
     /// `deadline_ms` (milliseconds since the epoch) is when the agent stops waiting: a

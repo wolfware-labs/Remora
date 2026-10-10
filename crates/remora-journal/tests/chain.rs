@@ -26,6 +26,7 @@ fn sample() -> EntryRecord {
         interrupted: None,
         rewind_target: None,
         incomplete: None,
+        late_start: None,
     }
 }
 
@@ -69,4 +70,14 @@ fn optional_fields_change_the_hash_only_when_present() {
     for changed in [interrupted, checkpointed, rewind, timed, incomplete] {
         assert_ne!(compute_hash(GENESIS_HASH, &changed), base);
     }
+}
+
+#[test]
+fn a_late_start_is_hashed_and_leaving_it_out_keeps_old_hashes() {
+    let mut late = sample();
+    late.late_start = Some(true);
+    assert_ne!(
+        compute_hash(GENESIS_HASH, &late),
+        compute_hash(GENESIS_HASH, &sample())
+    );
 }

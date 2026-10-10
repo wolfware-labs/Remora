@@ -45,6 +45,7 @@ pub fn record(prompt: &str) -> EntryRecord {
         interrupted: None,
         rewind_target: None,
         incomplete: None,
+        late_start: None,
     }
 }
 
