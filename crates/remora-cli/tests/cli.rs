@@ -247,6 +247,83 @@ fn init_and_uninit_manage_the_claude_code_hooks() {
 }
 
 #[test]
+fn status_names_the_binary_the_hooks_run_and_a_stale_one() {
+    let s = Setup::new();
+    let config = tempfile::TempDir::new().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(REMORA)
+            .args(args)
+            .env("REMORA_DATA_DIR", s.data.path())
+            .env("CLAUDE_CONFIG_DIR", config.path())
+            .current_dir(s.repo.path())
+            .output()
+            .unwrap()
+    };
+    assert!(run(&["init", "--no-service"]).status.success());
+
+    // No daemon is running: status still says what is installed.
+    let text = stdout(&run(&["status"]));
+    // The path init recorded (on Windows, cargo puts target\debug on PATH: that entry).
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.path().join("settings.json")).unwrap()).unwrap();
+    let recorded = remora_cli::init::installed_exe(&settings).unwrap();
+    assert_eq!(
+        recorded.canonicalize().unwrap(),
+        std::path::Path::new(REMORA).canonicalize().unwrap()
+    );
+    assert!(
+        text.contains(&format!("hooks     {}", recorded.display())),
+        "{text}"
+    );
+    assert!(!text.contains("⚠ hooks"), "{text}");
+
+    // The binary the hooks run is gone (an upgrade removed it).
+    let gone = config.path().join("old/remora");
+    let mut settings = serde_json::json!({});
+    remora_cli::init::install(&mut settings, &gone).unwrap();
+    std::fs::write(config.path().join("settings.json"), settings.to_string()).unwrap();
+
+    let text = stdout(&run(&["status"]));
+    assert!(
+        text.contains("⚠ hooks: ") && text.contains("no longer exists: run `remora init` to repair"),
+        "{text}"
+    );
+    assert!(run(&["init", "--no-service"]).status.success());
+    assert!(!stdout(&run(&["status"])).contains("⚠ hooks"));
+}
+
+/// Homebrew links `bin/remora` to a versioned file an upgrade removes: the hooks must run
+/// the link.
+#[cfg(unix)]
+#[test]
+fn init_records_the_remora_on_path_not_the_file_it_links_to() {
+    let s = Setup::new();
+    let config = tempfile::TempDir::new().unwrap();
+    let bin = tempfile::TempDir::new().unwrap();
+    let link = bin.path().join("remora");
+    std::os::unix::fs::symlink(REMORA, &link).unwrap();
+    let path = std::env::join_paths(
+        std::iter::once(bin.path().to_path_buf())
+            .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+    )
+    .unwrap();
+
+    let out = Command::new(&link)
+        .args(["init", "--no-service"])
+        .env("REMORA_DATA_DIR", s.data.path())
+        .env("CLAUDE_CONFIG_DIR", config.path())
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{}", stderr(&out));
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(config.path().join("settings.json")).unwrap()).unwrap();
+    assert_eq!(remora_cli::init::installed_exe(&settings), Some(link));
+    assert!(!stdout(&out).contains("not on PATH"), "{}", stdout(&out));
+}
+
+#[test]
 fn a_hook_that_snapshots_nothing_is_fast() {
     let s = Setup::new();
     let cwd = s.repo.path().to_path_buf();

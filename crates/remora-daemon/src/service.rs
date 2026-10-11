@@ -90,6 +90,44 @@ pub fn windows_run_command(exe: &Path) -> String {
     format!("\"{}\" run", exe.display())
 }
 
+/// The executable a launchd agent written by [`launchd_plist`] runs.
+pub fn exe_in_plist(plist: &str) -> Option<PathBuf> {
+    let args = plist.split_once("<key>ProgramArguments</key>")?.1;
+    let first = args.split_once("<string>")?.1.split_once("</string>")?.0;
+    Some(PathBuf::from(xml_unescape(first)))
+}
+
+/// The executable a systemd unit written by [`systemd_unit`] runs.
+pub fn exe_in_unit(unit: &str) -> Option<PathBuf> {
+    let exec = unit.lines().find_map(|line| line.strip_prefix("ExecStart="))?;
+    let mut chars = exec.strip_prefix('"')?.chars();
+    let mut path = String::new();
+    loop {
+        match chars.next()? {
+            '\\' => path.push(chars.next()?),
+            '%' | '$' => {
+                let c = chars.next()?;
+                path.push(c);
+            }
+            '"' => return Some(PathBuf::from(path)),
+            c => path.push(c),
+        }
+    }
+}
+
+/// The executable a Windows logon command written by [`windows_run_command`] runs.
+pub fn exe_in_run_command(command: &str) -> Option<PathBuf> {
+    let rest = command.trim().strip_prefix('"')?;
+    Some(PathBuf::from(rest.split_once('"')?.0))
+}
+
+fn xml_unescape(s: &str) -> String {
+    s.replace("&quot;", "\"")
+        .replace("&gt;", ">")
+        .replace("&lt;", "<")
+        .replace("&amp;", "&")
+}
+
 fn xml_escape(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
@@ -147,6 +185,19 @@ fn write_file(path: &Path, contents: &str) -> Result<(), ServiceError> {
     std::fs::write(path, contents).map_err(io_err)
 }
 
+/// The executable a service file at `path` runs; a missing file is no service.
+#[allow(dead_code)] // unused on platforms without service files
+fn read_installed(path: &Path, parse: fn(&str) -> Option<PathBuf>) -> Result<Option<PathBuf>, ServiceError> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(parse(&text)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(source) => Err(ServiceError::Io {
+            path: path.to_path_buf(),
+            source,
+        }),
+    }
+}
+
 #[allow(dead_code)] // unused on platforms without a service manager
 fn remove_file(path: &Path) -> Result<(), ServiceError> {
     match std::fs::remove_file(path) {
@@ -162,6 +213,11 @@ fn remove_file(path: &Path) -> Result<(), ServiceError> {
 /// Register `exe run` to start at login, and start it now. Returns what was done.
 pub fn install(exe: &Path) -> Result<String, ServiceError> {
     platform::install(exe)
+}
+
+/// The `remorad` the installed service runs, if one is installed.
+pub fn installed_exe() -> Result<Option<PathBuf>, ServiceError> {
+    platform::installed_exe()
 }
 
 /// Undo [`install`]. Stopping a daemon started some other way is up to the caller.
@@ -218,6 +274,10 @@ mod platform {
         Ok(format!("installed launchd agent {}", plist.display()))
     }
 
+    pub(super) fn installed_exe() -> Result<Option<PathBuf>, ServiceError> {
+        read_installed(&plist_path()?, exe_in_plist)
+    }
+
     pub(super) fn uninstall() -> Result<String, ServiceError> {
         let plist = plist_path()?;
         if !plist.exists() {
@@ -247,6 +307,10 @@ mod platform {
         // `restart` also starts it, and replaces a daemon from an earlier install.
         run("systemctl", &["--user", "restart", SYSTEMD_UNIT])?;
         Ok(format!("installed systemd user unit {}", unit.display()))
+    }
+
+    pub(super) fn installed_exe() -> Result<Option<PathBuf>, ServiceError> {
+        read_installed(&unit_path()?, exe_in_unit)
     }
 
     pub(super) fn uninstall() -> Result<String, ServiceError> {
@@ -287,6 +351,17 @@ mod platform {
         ))
     }
 
+    pub(super) fn installed_exe() -> Result<Option<PathBuf>, ServiceError> {
+        // `reg query` prints `    Remora    REG_SZ    "C:\...\remorad.exe" run`.
+        let Ok(out) = run("reg", &["query", RUN_KEY, "/v", RUN_VALUE]) else {
+            return Ok(None);
+        };
+        Ok(out
+            .lines()
+            .find_map(|line| line.split_once("REG_SZ"))
+            .and_then(|(_, command)| exe_in_run_command(command)))
+    }
+
     pub(super) fn uninstall() -> Result<String, ServiceError> {
         // Nothing to remove is fine; failing to remove an entry that exists is an error.
         if run("reg", &["query", RUN_KEY, "/v", RUN_VALUE]).is_err() {
@@ -317,6 +392,10 @@ mod platform {
 
     pub(super) fn install(_exe: &Path) -> Result<String, ServiceError> {
         Err(ServiceError::Unsupported)
+    }
+
+    pub(super) fn installed_exe() -> Result<Option<PathBuf>, ServiceError> {
+        Ok(None)
     }
 
     pub(super) fn uninstall() -> Result<String, ServiceError> {

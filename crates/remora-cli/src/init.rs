@@ -66,6 +66,29 @@ pub fn hook_command(exe: &Path) -> String {
     format!("{quoted}\" {HOOK_SUFFIX}")
 }
 
+/// The `remora` executable the installed hooks run: the first hook Remora added, its
+/// command's quoted path read back (see [`hook_command`]). `None` when none is installed.
+pub fn installed_exe(settings: &Value) -> Option<PathBuf> {
+    let hooks = settings.get("hooks")?.as_object()?;
+    let command = hooks
+        .values()
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|group| group.get("hooks")?.as_array())
+        .flatten()
+        .filter_map(|handler| handler.get("command")?.as_str())
+        .find(|command| is_ours(command))?;
+    let mut chars = command.strip_prefix('"')?.chars();
+    let mut path = String::new();
+    loop {
+        match chars.next()? {
+            '\\' => path.push(chars.next()?),
+            '"' => return Some(PathBuf::from(path)),
+            c => path.push(c),
+        }
+    }
+}
+
 /// Whether a hook command is one Remora installed.
 pub fn is_ours(command: &str) -> bool {
     command.trim_end().ends_with(HOOK_SUFFIX) && command.contains("remora")
@@ -239,5 +262,19 @@ mod tests {
         );
         assert!(is_ours(&hook_command(Path::new("/x/remora"))));
         assert!(!is_ours("prettier --write"));
+    }
+
+    #[test]
+    fn the_installed_executable_is_read_back_from_the_hooks() {
+        let exe = Path::new("/opt/my $tools/\"q\" \\ `x`/remora");
+        let mut settings =
+            json!({ "hooks": { "Stop": [{ "hooks": [{ "type": "command", "command": "other" }] }] } });
+        assert_eq!(installed_exe(&settings), None);
+
+        install(&mut settings, exe).unwrap();
+
+        assert_eq!(installed_exe(&settings).as_deref(), Some(exe));
+        uninstall(&mut settings);
+        assert_eq!(installed_exe(&settings), None);
     }
 }

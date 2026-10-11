@@ -1,14 +1,15 @@
 use std::time::{Duration, Instant};
 
 use super::{CliError, Ctx, EXIT_ERROR, service};
-use crate::init;
+use crate::{init, install_path};
 
 /// `remora init`: install the Claude Code hooks (user-wide) and, unless `no_service`, the
 /// login service; then check both.
 pub fn init(ctx: &Ctx, no_service: bool) -> Result<(), CliError> {
     let error = |e: init::InitError| CliError::new(EXIT_ERROR, e.to_string());
-    let exe = std::env::current_exe()
-        .and_then(|exe| exe.canonicalize())
+    // The path people run `remora` by: it survives upgrades (see `install_path`).
+    let (exe, on_path) = std::env::current_exe()
+        .and_then(|exe| install_path::stable(&exe, "remora"))
         .map_err(|e| CliError::new(EXIT_ERROR, e.to_string()))?;
     let settings = init::settings_path().map_err(error)?;
     let changed = init::update_file(&settings, |value| init::install(value, &exe)).map_err(error)?;
@@ -17,6 +18,12 @@ pub fn init(ctx: &Ctx, no_service: bool) -> Result<(), CliError> {
         if changed { "installed" } else { "already installed" },
         settings.display()
     );
+    if !on_path {
+        println!(
+            "· this remora is not on PATH: the hooks run {}; run `remora init` again if it moves",
+            exe.display()
+        );
+    }
     if no_service {
         println!("· login service skipped (--no-service); hooks start the daemon when needed");
     } else {

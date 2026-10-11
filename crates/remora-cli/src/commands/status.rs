@@ -1,22 +1,79 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use remora_ipc::{Request, Response};
+
+use crate::{init, install_path};
 
 use super::{
     CliError, Ctx, EXIT_NO_DAEMON, ago, now_ms, one_line, open_sessions, points_page, short_session,
     unexpected,
 };
 
-/// `remora status`: the daemon, and what is recorded for this project.
+/// What Remora installed outside its data folder: which binary it runs, and what is wrong
+/// with it if anything is.
+struct Installed {
+    exe: Option<PathBuf>,
+    problem: Option<String>,
+}
+
+impl Installed {
+    fn check(exe: Option<PathBuf>, name: &str) -> Self {
+        let problem = exe
+            .as_deref()
+            .and_then(|exe| install_path::problem(exe, name, std::env::var_os("PATH").as_deref()));
+        Self { exe, problem }
+    }
+
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({ "command": self.exe, "problem": self.problem })
+    }
+
+    fn print(&self, label: &str, missing: &str) {
+        match &self.exe {
+            Some(exe) => println!("{label}  {}", exe.display()),
+            None => println!("{label}  {missing}"),
+        }
+        if let Some(problem) = &self.problem {
+            println!("⚠ {}: {problem}: run `remora init` to repair", label.trim_end());
+        }
+    }
+}
+
+/// The hooks in Claude Code's settings and the login service.
+fn installed() -> (Installed, Installed) {
+    let hooks = init::settings_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .and_then(|text| serde_json::from_str(&text).ok())
+        .and_then(|settings| init::installed_exe(&settings));
+    let service = remora_daemon::service::installed_exe().ok().flatten();
+    (
+        Installed::check(hooks, "remora"),
+        Installed::check(service, "remorad"),
+    )
+}
+
+fn print_installed((hooks, service): &(Installed, Installed)) {
+    hooks.print("hooks   ", "not installed (run `remora init`)");
+    service.print("service ", "not installed (hooks start the daemon when needed)");
+}
+
+/// `remora status`: the daemon, what is installed, and what is recorded for this project.
 pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
+    let installed = installed();
     let mut client = match ctx.client() {
         Ok(client) => client,
         Err(e) if e.code == EXIT_NO_DAEMON => {
             if json {
-                println!("{}", serde_json::json!({ "daemon": null, "root": root }));
+                println!(
+                    "{}",
+                    serde_json::json!({ "daemon": null, "root": root,
+                        "hooks": installed.0.json(), "service": installed.1.json() })
+                );
             } else {
                 println!("remora {}  ·  daemon not running", env!("CARGO_PKG_VERSION"));
                 println!("  start it with `remora service install` (or `remorad run`)");
+                print_installed(&installed);
             }
             return Err(e);
         }
@@ -54,6 +111,8 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
                 "retention": status.retention,
                 "config_problem": status.config_problem,
                 "plain_copies_because": status.plain_copies_because,
+                "hooks": installed.0.json(),
+                "service": installed.1.json(),
             })
         );
         return Ok(());
@@ -70,6 +129,7 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
             client.daemon_version()
         );
     }
+    print_installed(&installed);
     println!(
         "project  {}  (id {})",
         status.root.display(),

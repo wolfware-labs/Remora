@@ -2,7 +2,9 @@
 
 use std::path::Path;
 
-use remora_daemon::service::{launchd_plist, systemd_unit, windows_run_command};
+use remora_daemon::service::{
+    exe_in_plist, exe_in_run_command, exe_in_unit, launchd_plist, systemd_unit, windows_run_command,
+};
 
 #[test]
 fn the_launchd_agent_runs_the_daemon_at_login_and_after_crashes() {
@@ -90,4 +92,23 @@ fn install_and_uninstall_for_real() {
     let exe = Path::new(env!("CARGO_BIN_EXE_remorad"));
     println!("{}", remora_daemon::service::install(exe).unwrap());
     println!("{}", remora_daemon::service::uninstall().unwrap());
+}
+
+#[test]
+fn the_installed_executable_is_read_back_from_each_service_file() {
+    for exe in [
+        Path::new("/opt/homebrew/bin/remorad"),
+        Path::new("/home/me/my tools/<a&b>/re\"mo%d$HOME\\x/remorad"),
+    ] {
+        assert_eq!(exe_in_plist(&launchd_plist(exe)).as_deref(), Some(exe));
+        assert_eq!(exe_in_unit(&systemd_unit(exe)).as_deref(), Some(exe));
+    }
+    let windows = Path::new(r"C:\Users\me\AppData\Local\Microsoft\WinGet\Links\remorad.exe");
+    assert_eq!(
+        exe_in_run_command(&windows_run_command(windows)).as_deref(),
+        Some(windows)
+    );
+    assert_eq!(exe_in_plist("<plist></plist>"), None);
+    assert_eq!(exe_in_unit("[Service]\n"), None);
+    assert_eq!(exe_in_run_command("remorad run"), None);
 }

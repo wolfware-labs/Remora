@@ -7,4 +7,5 @@ pub mod claude;
 pub mod commands;
 pub mod hook;
 pub mod init;
+pub mod install_path;
 pub mod root;

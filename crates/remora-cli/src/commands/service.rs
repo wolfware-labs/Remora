@@ -4,17 +4,19 @@ use std::time::Duration;
 use remora_daemon::service;
 
 use super::{CliError, Ctx, EXIT_ERROR};
+use crate::install_path;
 
-/// `remorad`, next to this `remora` or on `PATH`.
+/// `remorad`, next to this `remora` or on `PATH`, as the path to record for it (see
+/// `install_path`: its `PATH` entry when it has one).
 pub fn find_remorad() -> Option<PathBuf> {
     let name = format!("remorad{}", std::env::consts::EXE_SUFFIX);
     let sibling = std::env::current_exe().ok()?.with_file_name(&name);
-    if sibling.is_file() {
-        return Some(sibling);
-    }
-    std::env::split_paths(&std::env::var_os("PATH")?)
-        .map(|dir| dir.join(&name))
-        .find(|candidate| candidate.is_file())
+    let found = if sibling.is_file() {
+        sibling
+    } else {
+        install_path::first_on_path("remorad", std::env::var_os("PATH").as_deref())?
+    };
+    install_path::stable(&found, "remorad").ok().map(|(path, _)| path)
 }
 
 /// `remora service install`: start `remorad` at login, and now.
