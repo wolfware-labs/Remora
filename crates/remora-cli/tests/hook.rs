@@ -39,6 +39,7 @@ impl Hooks {
             data_dir: self.setup.data.path().to_path_buf(),
             remora,
             start_wait: Duration::from_secs(5),
+            replace_wait: Duration::from_secs(5),
             version: remora_cli::upgrade::VERSION.to_owned(),
         }
     }
@@ -235,7 +236,24 @@ fn a_stale_connection_never_stops_the_daemon_that_replaced_its_own() {
 }
 
 #[test]
-fn a_replacement_that_runs_out_of_time_still_lets_the_hook_record() {
+fn a_replacement_without_time_is_an_error() {
+    // What the next test relies on: with no time, `replace_older` fails (it never reports
+    // success it did not see), so the hook takes its fallback.
+    let h = Hooks::with_daemon();
+    let client = h.client();
+    let data = h.setup.data.path();
+    let result = remora_cli::upgrade::replace_older(
+        client,
+        data,
+        std::path::Path::new(common::REMORA),
+        "999.0.0",
+        Duration::ZERO,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn a_replacement_without_time_still_lets_the_hook_record() {
     let mut h = Hooks::with_daemon();
     let cwd = h.setup.repo.path().to_path_buf();
     let old = h.daemon.take().unwrap();
@@ -243,10 +261,10 @@ fn a_replacement_that_runs_out_of_time_still_lets_the_hook_record() {
 
     let env = HookEnv {
         version: "999.0.0".into(),
-        start_wait: Duration::from_millis(1),
+        // Replacing gets no time at all; starting a daemon gets plenty.
+        replace_wait: Duration::ZERO,
         ..h.env(Some(PathBuf::from(common::REMORA)))
     };
-    // The hook's own deadline is far longer than the replacement's wait.
     assert_eq!(
         run(prompt(&cwd, "after the upgrade").to_string().as_bytes(), &env),
         None

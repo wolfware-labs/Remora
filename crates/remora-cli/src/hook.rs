@@ -39,6 +39,9 @@ pub struct HookEnv {
     pub remora: Option<PathBuf>,
     /// How long to wait for a daemon that was just started.
     pub start_wait: Duration,
+    /// How long replacing an older daemon may take, apart from `start_wait`: when it runs
+    /// out, the hook goes on with whatever daemon it can reach or start.
+    pub replace_wait: Duration,
     /// This `remora`'s version: an older daemon is replaced (see `upgrade`).
     pub version: String,
 }
@@ -113,7 +116,7 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     };
     // One budget for the whole hook: connecting, starting a daemon (twice at most), and
     // the call itself.
-    let deadline = Instant::now() + 2 * env.start_wait + timeout;
+    let deadline = Instant::now() + 2 * env.start_wait + env.replace_wait + timeout;
     let request = to_request(event, root)?;
     let answer = connect(env, timeout, deadline).and_then(|client| {
         let left = deadline.saturating_duration_since(Instant::now());
@@ -267,7 +270,13 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         // After an upgrade: this version replaces the daemon, once. If that fails, whatever
         // answers now serves this call; failing that, the loop below starts one.
         (Ok(client), Some(remora)) => {
-            match upgrade::replace_older(client, &env.data_dir, remora, &env.version, wait(env.start_wait)) {
+            match upgrade::replace_older(
+                client,
+                &env.data_dir,
+                remora,
+                &env.version,
+                wait(env.replace_wait),
+            ) {
                 Ok(client) => return Ok(client),
                 Err(_) => match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
                     Err(ClientError::DaemonNotRunning) => {}
