@@ -18,6 +18,9 @@ repository = "https://github.com/wolfware-labs/remora"
 homepage = "https://github.com/wolfware-labs/remora"
 authors = ["Mariano Santoro"]
 license = "MIT OR Apache-2.0"
+readme = "README.md"
+keywords = ["ai-agent", "claude-code", "snapshot", "undo", "rewind"]
+categories = ["command-line-utilities", "development-tools", "filesystem"]
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
