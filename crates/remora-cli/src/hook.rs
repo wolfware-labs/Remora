@@ -19,9 +19,10 @@ use crate::upgrade;
 /// The most hook input read from stdin.
 pub const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
 /// How long a snapshotting hook waits for its answer.
-/// Claude Code waits 30 s for these hooks (the timeout `remora init` writes); with up to two
-/// daemon starts of 2 s each, 24 s keeps the whole hook inside it. Giving up earlier would let
-/// the command run before its restore point exists.
+/// Claude Code waits 30 s for these hooks (the timeout `remora init` writes). The whole hook
+/// (replacing an older daemon, up to two daemon starts, and the call) is held to
+/// `2 * start_wait + 24 s`, 28 s with the 2 s `remora hook` uses, which leaves Claude Code
+/// headroom. Giving up earlier would let the command run before its restore point exists.
 pub const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(24);
 /// How long any other hook waits for its answer.
 pub const QUICK_TIMEOUT: Duration = Duration::from_secs(2);
@@ -116,9 +117,9 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     };
     // One budget for the whole hook: connecting, starting a daemon (twice at most), and
     // the call itself.
-    let deadline = Instant::now() + 2 * env.start_wait + env.replace_wait + timeout;
+    let deadline = Instant::now() + 2 * env.start_wait + timeout;
     let request = to_request(event, root)?;
-    let answer = connect(env, timeout, deadline).and_then(|client| {
+    let answer = connect(env, timeout, deadline, &note).and_then(|client| {
         let left = deadline.saturating_duration_since(Instant::now());
         let wait = timeout.min(left).max(Duration::from_millis(10));
         // The daemon marks the checkpoint late if it is ready only after this hook stopped waiting.
@@ -256,8 +257,14 @@ fn system_message(text: &str) -> String {
 }
 
 /// Connect, starting a daemon if none answers (and one more if the first is not up within
-/// `start_wait`). Never waits past `deadline`.
-fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client, ClientError> {
+/// `start_wait`). Replacing an older daemon spends from the same `deadline`, at most
+/// `replace_wait`. Never waits past `deadline`.
+fn connect(
+    env: &HookEnv,
+    timeout: Duration,
+    deadline: Instant,
+    note: &dyn Fn(&str),
+) -> Result<Client, ClientError> {
     let wait = |limit: Duration| {
         let left = deadline.saturating_duration_since(Instant::now());
         limit.min(left).max(Duration::from_millis(10))
@@ -275,13 +282,18 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
                 &env.data_dir,
                 remora,
                 &env.version,
-                wait(env.replace_wait),
+                // Exactly this much, even none: no floor.
+                env.replace_wait
+                    .min(deadline.saturating_duration_since(Instant::now())),
             ) {
                 Ok(client) => return Ok(client),
-                Err(_) => match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
-                    Err(ClientError::DaemonNotRunning) => {}
-                    connected => return connected,
-                },
+                Err(e) => {
+                    note(&format!("replacing the older daemon failed: {e}"));
+                    match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
+                        Err(ClientError::DaemonNotRunning) => {}
+                        connected => return connected,
+                    }
+                }
             }
         }
         (connected, _) => return connected,

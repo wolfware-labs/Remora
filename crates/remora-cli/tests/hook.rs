@@ -269,7 +269,15 @@ fn a_replacement_without_time_still_lets_the_hook_record() {
         run(prompt(&cwd, "after the upgrade").to_string().as_bytes(), &env),
         None
     );
-    // The prompt opened a turn on the new daemon; ending it journals it.
+    // The fallback ran: the failed replacement is in the hook log.
+    let log = std::fs::read_to_string(h.setup.data.path().join("hook.log")).unwrap_or_default();
+    assert!(
+        log.contains("replacing the older daemon failed"),
+        "hook.log: {log:?}"
+    );
+    // The prompt opened a turn on a daemon the hook started; ending it journals it. This hook
+    // also claims 999.0.0, it asks that daemon to stop too and falls back again; the open turn
+    // is on disk.
     assert_eq!(run(stop(&cwd).to_string().as_bytes(), &env), None);
     assert_eq!(h.journal_entries(), 1, "the event was recorded");
 }
