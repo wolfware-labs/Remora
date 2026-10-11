@@ -1,0 +1,45 @@
+name: bench
+
+# Snapshot, restore and hook benchmarks (criterion). On demand only: shared runners are
+# noisy and their minutes are billed; the per-push gate is the latency budget in `ci`.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  bench:
+    name: bench (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: linux
+            runner: ubuntu-latest
+          - os: macos
+            runner: macos-latest
+          - os: windows
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@02cb101ec7c40f2c49e1d9714d64511d8e1b74de # v1
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Benchmarks
+        shell: bash
+        run: |
+          cargo bench -p remora-snap -p remora-engine --bench snapshot --bench hook --locked -- --output-format bencher | tee bench.txt
+          {
+            echo "### Benchmarks on ${{ matrix.os }} (\`${{ matrix.runner }}\`)"
+            echo
+            echo '```text'
+            grep '^test ' bench.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

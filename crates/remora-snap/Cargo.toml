@@ -24,12 +24,17 @@ log.workspace = true
 xattr.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
 tempfile.workspace = true
 proptest.workspace = true
 walkdir.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
 xattr.workspace = true
+
+[[bench]]
+name = "snapshot"
+harness = false
 
 [lints]
 workspace = true
