@@ -188,6 +188,75 @@ fn a_hook_replaces_an_older_daemon_with_its_own_version() {
 }
 
 #[test]
+fn parallel_hooks_replace_an_older_daemon_once_and_both_succeed() {
+    let mut h = Hooks::with_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+    h.send(&prompt(&cwd, "before the upgrade"));
+    let old = h.daemon.take().unwrap();
+    std::thread::spawn(move || old.wait());
+
+    let env = HookEnv {
+        version: "999.0.0".into(),
+        ..h.env(Some(PathBuf::from(common::REMORA)))
+    };
+    let outputs: Vec<_> = std::thread::scope(|scope| {
+        let hooks: Vec<_> = (0..2)
+            .map(|_| scope.spawn(|| run(stop(&cwd).to_string().as_bytes(), &env)))
+            .collect();
+        hooks.into_iter().map(|hook| hook.join().unwrap()).collect()
+    });
+    assert_eq!(outputs, [None, None], "neither hook warned");
+
+    let mut client = h.client();
+    assert_eq!(client.daemon_version(), remora_cli::upgrade::VERSION);
+    match client.call(Request::Status { root: h.setup.root() }).unwrap() {
+        Response::Status { status } => assert!(status.journal_entries >= 1, "the open turn survived"),
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+#[test]
+fn a_stale_connection_never_stops_the_daemon_that_replaced_its_own() {
+    let h = Hooks::with_daemon();
+    let data = h.setup.data.path().to_path_buf();
+    // Another hook's connection to the daemon, opened before it was replaced.
+    let stale = Client::connect(&data).unwrap();
+    h.daemon.as_ref().unwrap().shutdown();
+    let mut h = h;
+    h.daemon.take().unwrap().wait();
+    let replacement = Daemon::start(DaemonConfig::new(&data)).unwrap();
+
+    // The stale connection is dead; stopping through it must leave the replacement alone.
+    let _ = stale.stop(&data, Duration::from_millis(500));
+    let mut client = Client::connect(&data).expect("the replacement still answers");
+    client.call(Request::Status { root: h.setup.root() }).unwrap();
+    replacement.shutdown();
+    replacement.wait();
+}
+
+#[test]
+fn a_replacement_that_runs_out_of_time_still_lets_the_hook_record() {
+    let mut h = Hooks::with_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+    let old = h.daemon.take().unwrap();
+    std::thread::spawn(move || old.wait());
+
+    let env = HookEnv {
+        version: "999.0.0".into(),
+        start_wait: Duration::from_millis(1),
+        ..h.env(Some(PathBuf::from(common::REMORA)))
+    };
+    // The hook's own deadline is far longer than the replacement's wait.
+    assert_eq!(
+        run(prompt(&cwd, "after the upgrade").to_string().as_bytes(), &env),
+        None
+    );
+    // The prompt opened a turn on the new daemon; ending it journals it.
+    assert_eq!(run(stop(&cwd).to_string().as_bytes(), &env), None);
+    assert_eq!(h.journal_entries(), 1, "the event was recorded");
+}
+
+#[test]
 fn a_subfolder_records_into_its_repository() {
     let h = Hooks::with_daemon();
     h.setup.write("src/lib.rs", "");

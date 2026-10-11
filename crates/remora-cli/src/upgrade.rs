@@ -41,9 +41,10 @@ pub fn start_daemon(remora: &Path, data_dir: &Path, limit: Duration) -> Result<(
     remora_daemon::spawn_detached(remora, &args, &cwd, limit).map_err(ClientError::Io)
 }
 
-/// `client`, unless its daemon is older than `ours`: then that daemon is asked to stop and
-/// this `remora` starts its own, and the client of the new one is returned. A daemon that
-/// does not stop, or a new one that does not answer within `wait`, leaves the error.
+/// `client`, unless its daemon is older than `ours`: then that very daemon (never one that
+/// replaced it meanwhile) is asked to stop and this `remora` starts its own, and the client
+/// of the new one is returned. A daemon that does not stop, or a new one that does not answer
+/// within `wait`, leaves the error; the stop gets at most half of `wait`.
 pub fn replace_older(
     client: Client,
     data_dir: &Path,
@@ -54,19 +55,20 @@ pub fn replace_older(
     if !is_older(client.daemon_version(), ours) {
         return Ok(client);
     }
-    drop(client);
     let deadline = Instant::now() + wait;
-    remora_ipc::stop_daemon(data_dir, wait)?;
-    start_daemon(
-        remora,
-        data_dir,
-        deadline.saturating_duration_since(Instant::now()),
-    )?;
+    client.stop(data_dir, wait / 2)?;
+    let mut started = false;
     loop {
         let left = deadline.saturating_duration_since(Instant::now());
         match Client::connect_with_timeout(data_dir, left.max(Duration::from_millis(10))) {
             Err(ClientError::DaemonNotRunning) if !left.is_zero() => {
-                thread::sleep(Duration::from_millis(50));
+                // Another remora may have started one by now; only start when none answers.
+                if !started {
+                    started = true;
+                    start_daemon(remora, data_dir, left)?;
+                } else {
+                    thread::sleep(Duration::from_millis(50));
+                }
             }
             connected => return connected,
         }

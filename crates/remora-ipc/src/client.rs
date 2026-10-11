@@ -166,6 +166,31 @@ impl Client {
         &self.daemon_version
     }
 
+    /// Ask the daemon behind this connection (and no other) to stop, and wait up to `timeout`
+    /// for it to be gone, or replaced by a daemon of another version. Unlike [`stop_daemon`]
+    /// this cannot stop a daemon that took the old one's place after the version was read.
+    pub fn stop(self, data_dir: &Path, timeout: Duration) -> Result<(), ClientError> {
+        let deadline = Instant::now() + timeout;
+        let stopping = self.daemon_version.clone();
+        // The daemon stops once it has read the request, whether or not the answer arrives.
+        let mut connection = self.with_timeout(timeout);
+        let _ = connection.call(Request::Shutdown);
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match Client::connect_with_timeout(data_dir, left.max(Duration::from_millis(10))) {
+                Ok(other) if other.daemon_version != stopping => return Ok(()),
+                Err(ClientError::DaemonNotRunning) if instance_lock_is_free(data_dir) => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+            if Instant::now() >= deadline {
+                return Err(ClientError::Timeout(timeout));
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     /// Send `request` and wait for its answer. An error answer is
     /// [`ClientError::Daemon`].
     pub fn call(&mut self, request: Request) -> Result<Response, ClientError> {

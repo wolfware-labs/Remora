@@ -88,7 +88,8 @@ impl Ctx {
 
     /// The version of the daemon answering for this data directory, if one does.
     pub fn daemon_version(&self) -> Option<String> {
-        self.client()
+        // Asking never replaces the daemon.
+        Client::connect_with_timeout(&self.data_dir, Duration::from_secs(120))
             .ok()
             .map(|client| client.daemon_version().to_owned())
     }

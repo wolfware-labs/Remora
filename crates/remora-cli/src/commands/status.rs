@@ -143,7 +143,7 @@ pub fn run(ctx: &Ctx, root: &Path, json: bool) -> Result<(), CliError> {
     );
     if client.daemon_version() != env!("CARGO_PKG_VERSION") {
         println!(
-            "⚠ the running daemon is version {}: run `remora service install` to replace it",
+            "⚠ the running daemon is version {}, not this remora's: update remora, or restart the daemon",
             client.daemon_version()
         );
     }

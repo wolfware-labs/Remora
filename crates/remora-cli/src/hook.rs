@@ -264,9 +264,16 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         &env.remora,
     ) {
         (Err(ClientError::DaemonNotRunning), _) => {}
-        // After an upgrade: this version replaces the daemon, once.
+        // After an upgrade: this version replaces the daemon, once. If that fails, whatever
+        // answers now serves this call; failing that, the loop below starts one.
         (Ok(client), Some(remora)) => {
-            return upgrade::replace_older(client, &env.data_dir, remora, &env.version, wait(env.start_wait));
+            match upgrade::replace_older(client, &env.data_dir, remora, &env.version, wait(env.start_wait)) {
+                Ok(client) => return Ok(client),
+                Err(_) => match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
+                    Err(ClientError::DaemonNotRunning) => {}
+                    connected => return connected,
+                },
+            }
         }
         (connected, _) => return connected,
     }
