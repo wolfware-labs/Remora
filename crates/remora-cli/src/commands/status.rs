@@ -17,11 +17,20 @@ struct Installed {
 }
 
 impl Installed {
-    fn check(exe: Option<PathBuf>, name: &str) -> Self {
-        let problem = exe
-            .as_deref()
-            .and_then(|exe| install_path::problem(exe, name, std::env::var_os("PATH").as_deref()));
-        Self { exe, problem }
+    /// `record` is what was found, or why it could not be read.
+    fn check(record: Result<Option<PathBuf>, String>, name: &str) -> Self {
+        match record {
+            Ok(exe) => {
+                let problem = exe
+                    .as_deref()
+                    .and_then(|exe| install_path::problem(exe, name, std::env::var_os("PATH").as_deref()));
+                Self { exe, problem }
+            }
+            Err(problem) => Self {
+                exe: None,
+                problem: Some(problem),
+            },
+        }
     }
 
     fn json(&self) -> serde_json::Value {
@@ -29,9 +38,10 @@ impl Installed {
     }
 
     fn print(&self, label: &str, missing: &str) {
-        match &self.exe {
-            Some(exe) => println!("{label}  {}", exe.display()),
-            None => println!("{label}  {missing}"),
+        match (&self.exe, &self.problem) {
+            (Some(exe), _) => println!("{label}  {}", exe.display()),
+            (None, None) => println!("{label}  {missing}"),
+            (None, Some(_)) => {}
         }
         if let Some(problem) = &self.problem {
             println!("⚠ {}: {problem}: run `remora init` to repair", label.trim_end());
@@ -39,16 +49,24 @@ impl Installed {
     }
 }
 
+/// The `remora` the hooks in Claude Code's settings run; only a missing file means none.
+fn hooks_record() -> Result<Option<PathBuf>, String> {
+    let path = init::settings_path().map_err(|e| e.to_string())?;
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    let settings =
+        serde_json::from_str(&text).map_err(|e| format!("{} is not valid JSON: {e}", path.display()))?;
+    Ok(init::installed_exe(&settings))
+}
+
 /// The hooks in Claude Code's settings and the login service.
 fn installed() -> (Installed, Installed) {
-    let hooks = init::settings_path()
-        .ok()
-        .and_then(|path| std::fs::read_to_string(path).ok())
-        .and_then(|text| serde_json::from_str(&text).ok())
-        .and_then(|settings| init::installed_exe(&settings));
-    let service = remora_daemon::service::installed_exe().ok().flatten();
+    let service = remora_daemon::service::installed_exe().map_err(|e| e.to_string());
     (
-        Installed::check(hooks, "remora"),
+        Installed::check(hooks_record(), "remora"),
         Installed::check(service, "remorad"),
     )
 }

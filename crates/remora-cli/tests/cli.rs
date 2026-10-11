@@ -250,11 +250,19 @@ fn init_and_uninit_manage_the_claude_code_hooks() {
 fn status_names_the_binary_the_hooks_run_and_a_stale_one() {
     let s = Setup::new();
     let config = tempfile::TempDir::new().unwrap();
+    // This build first on PATH: a remora installed on the machine must not matter.
+    let path = std::env::join_paths(
+        std::iter::once(std::path::Path::new(REMORA).parent().unwrap().to_path_buf()).chain(
+            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+        ),
+    )
+    .unwrap();
     let run = |args: &[&str]| {
         Command::new(REMORA)
             .args(args)
             .env("REMORA_DATA_DIR", s.data.path())
             .env("CLAUDE_CONFIG_DIR", config.path())
+            .env("PATH", &path)
             .current_dir(s.repo.path())
             .output()
             .unwrap()
@@ -290,6 +298,28 @@ fn status_names_the_binary_the_hooks_run_and_a_stale_one() {
     );
     assert!(run(&["init", "--no-service"]).status.success());
     assert!(!stdout(&run(&["status"])).contains("⚠ hooks"));
+}
+
+#[test]
+fn status_reports_settings_it_cannot_read_instead_of_not_installed() {
+    let s = Setup::new();
+    let config = tempfile::TempDir::new().unwrap();
+    std::fs::write(config.path().join("settings.json"), "{ not json").unwrap();
+
+    let out = Command::new(REMORA)
+        .arg("status")
+        .env("REMORA_DATA_DIR", s.data.path())
+        .env("CLAUDE_CONFIG_DIR", config.path())
+        .current_dir(s.repo.path())
+        .output()
+        .unwrap();
+
+    let text = stdout(&out);
+    assert!(
+        text.contains("⚠ hooks: ") && text.contains("is not valid JSON"),
+        "{text}"
+    );
+    assert!(!text.contains("hooks     not installed"), "{text}");
 }
 
 /// Homebrew links `bin/remora` to a versioned file an upgrade removes: the hooks must run
