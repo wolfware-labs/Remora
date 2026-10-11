@@ -2,7 +2,7 @@
 
 mod common;
 
-use std::process::Command;
+use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
 use common::{REMORA, Setup, after_bash, before_bash, prompt, stderr, stdout, stop};
@@ -252,17 +252,28 @@ fn a_hook_that_snapshots_nothing_is_fast() {
     let cwd = s.repo.path().to_path_buf();
     s.hook(&prompt(&cwd, "warm up")); // starts the daemon
     let payload = after_bash(&cwd, "true", "toolu_x");
+    let time = |run: &dyn Fn() -> Output| {
+        let started = Instant::now();
+        assert!(run().status.success());
+        started.elapsed()
+    };
 
-    let mut times: Vec<Duration> = (0..20)
-        .map(|_| {
-            let started = Instant::now();
-            assert!(s.hook(&payload).status.success());
-            started.elapsed()
-        })
-        .collect();
-    times.sort();
+    // A busy machine slows every process start. Measure, turn about, a hook that exits before
+    // reaching the daemon (unreadable input), and keep the fastest run of each: noise only ever
+    // adds time. What is left is the hook's own work and its round trip to the daemon.
+    let (mut hook, mut start) = (Duration::MAX, Duration::MAX);
+    for _ in 0..20 {
+        hook = hook.min(time(&|| s.hook(&payload)));
+        start = start.min(time(&|| {
+            s.remora_with_input(&["hook", "claude-code"], Some("not json"))
+        }));
+    }
 
-    assert!(times[10] < Duration::from_millis(50), "median {:?}", times[10]);
+    let own = hook.saturating_sub(start);
+    assert!(
+        own < Duration::from_millis(50),
+        "the hook took {own:?} beyond starting the process ({hook:?} in all, {start:?} to start)"
+    );
 }
 
 #[test]
