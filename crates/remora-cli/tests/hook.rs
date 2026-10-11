@@ -39,6 +39,7 @@ impl Hooks {
             data_dir: self.setup.data.path().to_path_buf(),
             remora,
             start_wait: Duration::from_secs(5),
+            version: remora_cli::upgrade::VERSION.to_owned(),
         }
     }
 
@@ -149,6 +150,41 @@ fn a_rewind_rolled_back_at_start_is_told_once_per_session() {
     );
     assert_eq!(second, None, "once per session");
     assert_eq!(h.setup.read("a.txt"), "kept");
+}
+
+#[test]
+fn a_hook_replaces_an_older_daemon_with_its_own_version() {
+    let mut h = Hooks::with_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+    h.send(&prompt(&cwd, "before the upgrade"));
+    // An in-process daemon lets go of its data folder in `wait`, as a process does on exit.
+    let old = h.daemon.take().unwrap();
+    let (exited, old_exits) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        old.wait();
+        let _ = exited.send(());
+    });
+
+    // This hook is a newer release than the daemon answering.
+    let env = HookEnv {
+        version: "999.0.0".into(),
+        ..h.env(Some(PathBuf::from(common::REMORA)))
+    };
+    assert_eq!(run(stop(&cwd).to_string().as_bytes(), &env), None);
+
+    old_exits
+        .recv_timeout(Duration::from_secs(10))
+        .expect("the older daemon was asked to stop");
+    let mut client = h.client();
+    assert_eq!(
+        client.daemon_version(),
+        remora_cli::upgrade::VERSION,
+        "the started daemon"
+    );
+    match client.call(Request::Status { root: h.setup.root() }).unwrap() {
+        Response::Status { status } => assert_eq!(status.journal_entries, 1, "the open turn survived"),
+        other => panic!("unexpected {other:?}"),
+    }
 }
 
 #[test]

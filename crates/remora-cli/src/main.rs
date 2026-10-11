@@ -177,6 +177,7 @@ fn run_hook(explicit: Option<PathBuf>) {
         data_dir,
         remora: std::env::current_exe().ok(),
         start_wait: Duration::from_secs(2),
+        version: remora_cli::upgrade::VERSION.to_owned(),
     };
     if let Some(output) = hook::run(&input, &env) {
         let mut stdout = std::io::stdout();

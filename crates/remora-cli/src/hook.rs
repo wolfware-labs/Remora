@@ -4,7 +4,6 @@
 //! `<data_dir>/hook.log`; when it means a session is not being recorded, Claude Code shows a
 //! warning once per session and reason. The process always exits 0.
 
-use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::thread;
@@ -15,6 +14,7 @@ use remora_ipc::{Client, ClientError, ErrorKind, Request, Response};
 
 use crate::claude::{self, AGENT, HookEvent};
 use crate::root::{self, Root};
+use crate::upgrade;
 
 /// The most hook input read from stdin.
 pub const MAX_INPUT_BYTES: usize = 2 * 1024 * 1024;
@@ -39,6 +39,8 @@ pub struct HookEnv {
     pub remora: Option<PathBuf>,
     /// How long to wait for a daemon that was just started.
     pub start_wait: Duration,
+    /// This `remora`'s version: an older daemon is replaced (see `upgrade`).
+    pub version: String,
 }
 
 /// Handle one hook call. Returns what to print on stdout: a `systemMessage` for Claude
@@ -257,9 +259,16 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         let left = deadline.saturating_duration_since(Instant::now());
         limit.min(left).max(Duration::from_millis(10))
     };
-    match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
-        Err(ClientError::DaemonNotRunning) => {}
-        connected => return connected,
+    match (
+        Client::connect_with_timeout(&env.data_dir, wait(timeout)),
+        &env.remora,
+    ) {
+        (Err(ClientError::DaemonNotRunning), _) => {}
+        // After an upgrade: this version replaces the daemon, once.
+        (Ok(client), Some(remora)) => {
+            return upgrade::replace_older(client, &env.data_dir, remora, &env.version, wait(env.start_wait));
+        }
+        (connected, _) => return connected,
     }
     let Some(remora) = &env.remora else {
         return Err(ClientError::DaemonNotRunning);
@@ -268,7 +277,7 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         if Instant::now() >= deadline {
             break;
         }
-        start_daemon(
+        upgrade::start_daemon(
             remora,
             &env.data_dir,
             deadline.saturating_duration_since(Instant::now()),
@@ -285,23 +294,6 @@ fn connect(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client
         }
     }
     Err(ClientError::DaemonNotRunning)
-}
-
-/// Start `remora daemon` for `data_dir`, detached so it outlives this hook, taking at most
-/// `limit` to do so.
-fn start_daemon(remora: &Path, data_dir: &Path, limit: Duration) -> Result<(), ClientError> {
-    // Not the agent's folder, which the agent may delete.
-    let cwd = if data_dir.is_dir() {
-        data_dir.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    };
-    let args = [
-        OsStr::new("--data-dir"),
-        data_dir.as_os_str(),
-        OsStr::new("daemon"),
-    ];
-    remora_daemon::spawn_detached(remora, &args, &cwd, limit).map_err(ClientError::Io)
 }
 
 /// Small files under the data directory, one per session (and reason).

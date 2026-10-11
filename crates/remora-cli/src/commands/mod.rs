@@ -17,6 +17,7 @@ use remora_engine::{PointKind, RestorePoint};
 use remora_ipc::{Client, ClientError, ErrorKind, Request, Response};
 
 use crate::root::{self, Root};
+use crate::upgrade;
 
 /// Exit codes.
 pub const EXIT_ERROR: u8 = 1;
@@ -69,11 +70,20 @@ pub struct Ctx {
 }
 
 impl Ctx {
+    /// A client of the daemon. An older daemon (after an upgrade) is replaced by this version
+    /// first (see `upgrade`).
     pub fn client(&self) -> Result<Client, CliError> {
-        Ok(Client::connect_with_timeout(
-            &self.data_dir,
-            Duration::from_secs(120),
-        )?)
+        let client = Client::connect_with_timeout(&self.data_dir, Duration::from_secs(120))?;
+        match std::env::current_exe() {
+            Ok(remora) => Ok(upgrade::replace_older(
+                client,
+                &self.data_dir,
+                &remora,
+                upgrade::VERSION,
+                Duration::from_secs(10),
+            )?),
+            Err(_) => Ok(client),
+        }
     }
 
     /// The version of the daemon answering for this data directory, if one does.

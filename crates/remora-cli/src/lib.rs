@@ -9,3 +9,4 @@ pub mod hook;
 pub mod init;
 pub mod install_path;
 pub mod root;
+pub mod upgrade;
