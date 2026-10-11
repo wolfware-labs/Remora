@@ -22,6 +22,9 @@ use crate::handler;
 use crate::worker::{self, Context, Job, Reply, WorkerHandle};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The message of the error a stopping daemon answers to requests it no longer runs: a client
+/// may send such a request again to another daemon.
+pub const SHUTTING_DOWN: &str = "remorad is shutting down";
 
 /// How the daemon runs. [`DaemonConfig::new`] gives the production defaults.
 #[derive(Clone)]
@@ -417,7 +420,7 @@ impl Shared {
         }
         let mut guard = lock(&self.workers);
         let Some(workers) = guard.as_mut() else {
-            return Err(ErrorBody::new(ErrorKind::Internal, "remorad is shutting down"));
+            return Err(ErrorBody::new(ErrorKind::Internal, SHUTTING_DOWN));
         };
         let key = match root.canonicalize() {
             Ok(canonical) => {

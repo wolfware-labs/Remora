@@ -238,7 +238,7 @@ fn a_stale_connection_never_stops_the_daemon_that_replaced_its_own() {
 #[test]
 fn a_replacement_without_time_is_an_error() {
     // What the next test relies on: with no time, `replace_older` fails (it never reports
-    // success it did not see), so the hook takes its fallback.
+    // success it did not see), so the hook takes its fallback, and it leaves the daemon alone.
     let h = Hooks::with_daemon();
     let client = h.client();
     let data = h.setup.data.path();
@@ -250,18 +250,19 @@ fn a_replacement_without_time_is_an_error() {
         Duration::ZERO,
     );
     assert!(result.is_err());
+    // A Shutdown would have arrived by now.
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(h.journal_entries(), 0, "the daemon still answers");
 }
 
 #[test]
 fn a_replacement_without_time_still_lets_the_hook_record() {
-    let mut h = Hooks::with_daemon();
+    let h = Hooks::with_daemon();
     let cwd = h.setup.repo.path().to_path_buf();
-    let old = h.daemon.take().unwrap();
-    std::thread::spawn(move || old.wait());
 
     let env = HookEnv {
         version: "999.0.0".into(),
-        // Replacing gets no time at all; starting a daemon gets plenty.
+        // Replacing gets no time at all: the older daemon is not even asked to stop.
         replace_wait: Duration::ZERO,
         ..h.env(Some(PathBuf::from(common::REMORA)))
     };
@@ -275,10 +276,40 @@ fn a_replacement_without_time_still_lets_the_hook_record() {
         log.contains("replacing the older daemon failed"),
         "hook.log: {log:?}"
     );
-    // The prompt opened a turn on a daemon the hook started; ending it journals it. This hook
-    // also claims 999.0.0, it asks that daemon to stop too and falls back again; the open turn
-    // is on disk.
+    // Both hooks recorded on the older daemon, which still runs.
     assert_eq!(run(stop(&cwd).to_string().as_bytes(), &env), None);
+    assert_eq!(h.journal_entries(), 1, "the event was recorded");
+}
+
+#[test]
+fn a_hook_waits_for_an_older_daemon_that_stops_slowly() {
+    let mut h = Hooks::with_daemon();
+    let cwd = h.setup.repo.path().to_path_buf();
+    // The older daemon is asked to stop, then holds its data folder (it finishes a long job,
+    // say) past the replacement's time and past both daemon starts the hook would try.
+    let old = h.daemon.take().unwrap();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(3));
+        old.wait();
+    });
+
+    let env = HookEnv {
+        version: "999.0.0".into(),
+        start_wait: Duration::from_secs(1),
+        replace_wait: Duration::from_secs(1),
+        ..h.env(Some(PathBuf::from(common::REMORA)))
+    };
+    assert_eq!(
+        run(prompt(&cwd, "after the upgrade").to_string().as_bytes(), &env),
+        None
+    );
+    let log = std::fs::read_to_string(h.setup.data.path().join("hook.log")).unwrap_or_default();
+    assert!(
+        log.contains("replacing the older daemon failed"),
+        "hook.log: {log:?}"
+    );
+    // The turn opened on the daemon the hook started once the older one was gone.
+    h.send(&stop(&cwd));
     assert_eq!(h.journal_entries(), 1, "the event was recorded");
 }
 

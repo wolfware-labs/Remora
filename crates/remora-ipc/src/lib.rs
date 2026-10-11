@@ -20,7 +20,7 @@ mod endpoint;
 mod framing;
 mod protocol;
 
-pub use client::{Client, ClientError, DEFAULT_TIMEOUT, stop_daemon};
+pub use client::{Client, ClientError, DEFAULT_TIMEOUT, instance_lock_is_free, stop_daemon};
 #[cfg(unix)]
 pub use endpoint::socket_dir_is_private;
 pub use endpoint::{Endpoint, MAX_SOCKET_PATH, endpoint};

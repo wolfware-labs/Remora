@@ -119,13 +119,26 @@ pub fn run(input: &[u8], env: &HookEnv) -> Option<String> {
     // the call itself.
     let deadline = Instant::now() + 2 * env.start_wait + timeout;
     let request = to_request(event, root)?;
-    let answer = connect(env, timeout, deadline, &note).and_then(|client| {
+    let call = |client: Client| {
         let left = deadline.saturating_duration_since(Instant::now());
         let wait = timeout.min(left).max(Duration::from_millis(10));
         // The daemon marks the checkpoint late if it is ready only after this hook stopped waiting.
         client
             .with_timeout(wait)
-            .call(with_deadline(request, epoch_ms(SystemTime::now() + wait)))
+            .call(with_deadline(request.clone(), epoch_ms(SystemTime::now() + wait)))
+    };
+    let answer = connect(env, timeout, deadline, &note).and_then(|(client, stopping)| {
+        match call(client) {
+            // The daemon this hook asked to stop answered the fallback, then stopped: it did
+            // not run the request, which goes to the daemon after it.
+            Err(e) if stopping && stopped(&e) => {
+                note(&format!(
+                    "the daemon stopped under this hook ({e}); trying the next one"
+                ));
+                connect_after_stop(env, timeout, deadline).and_then(call)
+            }
+            answer => answer,
+        }
     });
     match answer {
         // Something the user should hear once per session (an interrupted rewind that was
@@ -258,46 +271,60 @@ fn system_message(text: &str) -> String {
 
 /// Connect, starting a daemon if none answers (and one more if the first is not up within
 /// `start_wait`). Replacing an older daemon spends from the same `deadline`, at most
-/// `replace_wait`. Never waits past `deadline`.
+/// `replace_wait`. Never waits past `deadline`. Also returns whether the client's daemon may
+/// be one this hook asked to stop (a replacement that failed).
 fn connect(
     env: &HookEnv,
     timeout: Duration,
     deadline: Instant,
     note: &dyn Fn(&str),
-) -> Result<Client, ClientError> {
-    let wait = |limit: Duration| {
-        let left = deadline.saturating_duration_since(Instant::now());
-        limit.min(left).max(Duration::from_millis(10))
-    };
+) -> Result<(Client, bool), ClientError> {
     match (
-        Client::connect_with_timeout(&env.data_dir, wait(timeout)),
+        Client::connect_with_timeout(&env.data_dir, bounded(timeout, deadline)),
         &env.remora,
     ) {
-        (Err(ClientError::DaemonNotRunning), _) => {}
-        // After an upgrade: this version replaces the daemon, once. If that fails, whatever
-        // answers now serves this call; failing that, the loop below starts one.
-        (Ok(client), Some(remora)) => {
-            match upgrade::replace_older(
-                client,
-                &env.data_dir,
-                remora,
-                &env.version,
-                // Exactly this much, even none: no floor.
-                env.replace_wait
-                    .min(deadline.saturating_duration_since(Instant::now())),
-            ) {
-                Ok(client) => return Ok(client),
-                Err(e) => {
-                    note(&format!("replacing the older daemon failed: {e}"));
-                    match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
-                        Err(ClientError::DaemonNotRunning) => {}
-                        connected => return connected,
-                    }
-                }
+        (Err(ClientError::DaemonNotRunning), _) => start(env, timeout, deadline).map(|c| (c, false)),
+        // After an upgrade: this version replaces the daemon, once. If that fails, the older
+        // daemon may be stopping: whatever answers once it is gone serves this call.
+        (Ok(client), Some(remora)) => match upgrade::replace_older(
+            client,
+            &env.data_dir,
+            remora,
+            &env.version,
+            // Exactly this much, even none: no floor.
+            env.replace_wait
+                .min(deadline.saturating_duration_since(Instant::now())),
+        ) {
+            Ok(client) => Ok((client, false)),
+            Err(e) => {
+                note(&format!("replacing the older daemon failed: {e}"));
+                connect_after_stop(env, timeout, deadline).map(|c| (c, true))
             }
-        }
-        (connected, _) => return connected,
+        },
+        (connected, _) => connected.map(|c| (c, false)),
     }
+}
+
+/// Connect after asking a daemon to stop: to one that answers, or, once no daemon holds the
+/// data folder any more, to one this hook starts. A daemon that is stopping answers no new
+/// connection but holds the folder until it is gone. Never waits past `deadline`.
+fn connect_after_stop(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client, ClientError> {
+    loop {
+        match Client::connect_with_timeout(&env.data_dir, bounded(timeout, deadline)) {
+            Err(ClientError::DaemonNotRunning) if remora_ipc::instance_lock_is_free(&env.data_dir) => {
+                return start(env, timeout, deadline);
+            }
+            Err(ClientError::DaemonNotRunning) if Instant::now() < deadline => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            connected => return connected,
+        }
+    }
+}
+
+/// Start a daemon and connect to it (one more start if the first is not up within
+/// `start_wait`). Never waits past `deadline`.
+fn start(env: &HookEnv, timeout: Duration, deadline: Instant) -> Result<Client, ClientError> {
     let Some(remora) = &env.remora else {
         return Err(ClientError::DaemonNotRunning);
     };
@@ -312,7 +339,7 @@ fn connect(
         )?;
         let started_by = (Instant::now() + env.start_wait).min(deadline);
         loop {
-            match Client::connect_with_timeout(&env.data_dir, wait(timeout)) {
+            match Client::connect_with_timeout(&env.data_dir, bounded(timeout, deadline)) {
                 Err(ClientError::DaemonNotRunning) if Instant::now() < started_by => {
                     thread::sleep(Duration::from_millis(50));
                 }
@@ -322,6 +349,30 @@ fn connect(
         }
     }
     Err(ClientError::DaemonNotRunning)
+}
+
+/// `limit`, but not past `deadline` (and never quite zero, which some waits read as forever).
+fn bounded(limit: Duration, deadline: Instant) -> Duration {
+    let left = deadline.saturating_duration_since(Instant::now());
+    limit.min(left).max(Duration::from_millis(10))
+}
+
+/// Whether `error` means the daemon stopped before it ran the request: it closed or broke the
+/// connection (a stopping daemon answers every request it read), or refused the request
+/// because it is shutting down.
+fn stopped(error: &ClientError) -> bool {
+    use std::io::ErrorKind as Io;
+    match error {
+        ClientError::Disconnected => true,
+        ClientError::Io(e) => matches!(
+            e.kind(),
+            Io::BrokenPipe | Io::ConnectionReset | Io::ConnectionAborted | Io::UnexpectedEof
+        ),
+        ClientError::Daemon(body) => {
+            body.kind == ErrorKind::Internal && body.message == remora_daemon::SHUTTING_DOWN
+        }
+        _ => false,
+    }
 }
 
 /// Small files under the data directory, one per session (and reason).

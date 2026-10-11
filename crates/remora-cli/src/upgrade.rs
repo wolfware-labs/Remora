@@ -44,7 +44,8 @@ pub fn start_daemon(remora: &Path, data_dir: &Path, limit: Duration) -> Result<(
 /// `client`, unless its daemon is older than `ours`: then that very daemon (never one that
 /// replaced it meanwhile) is asked to stop and this `remora` starts its own, and the client
 /// of the new one is returned. A daemon that does not stop, or a new one that does not answer
-/// within `wait`, leaves the error; the stop gets at most half of `wait`.
+/// within `wait`, leaves the error; the stop gets at most half of `wait`. Without that time
+/// the daemon is not asked to stop at all: it goes on running, and the result is an error.
 pub fn replace_older(
     client: Client,
     data_dir: &Path,
@@ -54,6 +55,9 @@ pub fn replace_older(
 ) -> Result<Client, ClientError> {
     if !is_older(client.daemon_version(), ours) {
         return Ok(client);
+    }
+    if (wait / 2).is_zero() {
+        return Err(ClientError::Timeout(wait));
     }
     let deadline = Instant::now() + wait;
     client.stop(data_dir, wait / 2)?;

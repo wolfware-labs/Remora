@@ -22,4 +22,4 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use detach::spawn_detached;
 pub use foreground::{Ran, run_in_foreground};
 pub use logfile::{LOG_ROTATE_BYTES, LogFile, install_logger};
-pub use server::{Daemon, DaemonConfig, DaemonError, DaemonHandle};
+pub use server::{Daemon, DaemonConfig, DaemonError, DaemonHandle, SHUTTING_DOWN};

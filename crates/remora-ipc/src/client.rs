@@ -317,7 +317,7 @@ pub fn stop_daemon(data_dir: &Path, timeout: Duration) -> Result<bool, ClientErr
 }
 
 /// Whether no daemon holds `<data_dir>/remorad.lock` (a missing file counts as free).
-fn instance_lock_is_free(data_dir: &Path) -> bool {
+pub fn instance_lock_is_free(data_dir: &Path) -> bool {
     let path = data_dir.join("remorad.lock");
     match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
         // Locking and dropping at once: the lock is only probed.
