@@ -1,6 +1,0 @@
-{
-  "session_id": "0f8c2b1e-7d4a-4c1b-9e2f-5a6b7c8d9e0f",
-  "cwd": "/home/me/proj",
-  "hook_event_name": "StopFailure",
-  "error": "rate_limit"
-}

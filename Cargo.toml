@@ -1,54 +1,33 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/remora-snap",
+    "crates/remora-types",
+    "crates/remora-fs",
+    "crates/remora-store",
     "crates/remora-journal",
     "crates/remora-engine",
     "crates/remora-ipc",
     "crates/remora-daemon",
+    "crates/remora-host",
     "crates/remora-cli",
+    "crates/remora-testkit",
+    "xtask",
 ]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.0.0"
 edition = "2024"
-rust-version = "1.89"
-publish = false
+license = "MIT OR Apache-2.0"
 repository = "https://github.com/wolfware-labs/remora"
 homepage = "https://github.com/wolfware-labs/remora"
-authors = ["Mariano Santoro"]
-license = "MIT OR Apache-2.0"
 
 [workspace.dependencies]
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-sha2 = "0.11"
-hex = "0.4"
-hmac = "0.13"
-thiserror = "2"
-walkdir = "2"
-reflink-copy = "0.1.30"
-rusqlite = { version = "0.40", features = ["bundled"] }
-ed25519-dalek = "3"
-getrandom = "0.4"
-tempfile = "3"
-proptest = "1"
-dirs = "7"
-log = { version = "0.4", features = ["std"] }
-interprocess = "2.4"
-widestring = "1"
-ctrlc = { version = "3.5", features = ["termination"] }
-clap = { version = "4.6", features = ["derive", "env"] }
-xattr = "1.6"
-toml = { version = "1.1", default-features = false, features = ["std", "serde", "parse"] }
-remora-snap = { path = "crates/remora-snap" }
-remora-journal = { path = "crates/remora-journal" }
-remora-engine = { path = "crates/remora-engine" }
-remora-ipc = { path = "crates/remora-ipc" }
-remora-daemon = { path = "crates/remora-daemon" }
-
-[workspace.lints.rust]
-unsafe_code = "forbid"
-
-[workspace.lints.clippy]
-unwrap_used = "warn"
+remora-types = { path = "crates/remora-types", version = "0.0.0" }
+remora-fs = { path = "crates/remora-fs", version = "0.0.0" }
+remora-store = { path = "crates/remora-store", version = "0.0.0" }
+remora-journal = { path = "crates/remora-journal", version = "0.0.0" }
+remora-engine = { path = "crates/remora-engine", version = "0.0.0" }
+remora-ipc = { path = "crates/remora-ipc", version = "0.0.0" }
+remora-daemon = { path = "crates/remora-daemon", version = "0.0.0" }
+remora-host = { path = "crates/remora-host", version = "0.0.0" }
+remora-testkit = { path = "crates/remora-testkit" }

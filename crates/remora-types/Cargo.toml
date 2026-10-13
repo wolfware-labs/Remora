@@ -1,0 +1,8 @@
+[package]
+name = "remora-types"
+description = "Wire messages, ids, error kinds and on-disk record types for Remora."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true

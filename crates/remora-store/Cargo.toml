@@ -1,0 +1,12 @@
+[package]
+name = "remora-store"
+description = "Snapshot store for Remora: blobs, manifests, restore."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+
+[dependencies]
+remora-types.workspace = true
+remora-fs = { workspace = true, features = ["sqlite"] }
