@@ -40,13 +40,13 @@ cargo clippy --locked --target aarch64-apple-darwin -p remora-types -p remora-fs
 ## Code rules
 
 - `unsafe` code is allowed only in the `remora_fs::sys` module, and every `unsafe` block carries a `// SAFETY:` comment.
-- `unwrap()` and `expect()` are denied outside tests. An `expect` that encodes an invariant needs `#[allow(clippy::expect_used)]` and a comment stating the invariant.
+- `unwrap()` and `expect()` are denied in product code. Tests, the `remora-testkit` fixtures and the `xtask` tooling may use them. An `expect` in product code that encodes an invariant needs `#[allow(clippy::expect_used)]` and a comment stating the invariant.
 - Remora makes no network calls. `deny.toml` bans HTTP clients, TLS stacks and DNS resolvers.
 - Each capability has one owning module (section 4 of the spec). Reuse it instead of writing a second version.
 
 ## Dependencies
 
-`deny.toml` defines the dependency policy. Dependencies must use one of the allowed licenses, come from crates.io, and have no open security advisories. A new dependency that fails `cargo deny check` needs a discussion in its pull request before the policy changes.
+`deny.toml` defines the dependency policy. Third-party dependencies must use one of the allowed licenses, come from crates.io, and have no open security advisories. Workspace crates depend on each other through `path` dependencies. A new dependency that fails `cargo deny check` needs a discussion in its pull request before the policy changes.
 
 ## Issues, milestones and labels
 

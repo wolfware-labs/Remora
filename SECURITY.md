@@ -23,6 +23,6 @@ The threat model is in [section 15 of the specification](docs/design/remora.md#1
 
 - **In scope:** another local user reading recorded files, the journal or the keys; connecting to or impersonating the daemon; planting files that Remora later trusts. A process of the same user that causes damage by accident, for example a rewind that writes through a symlink or into an excluded folder.
 - **Best effort:** a malicious process running as the same user. It can already read and change everything the user can.
-- **Out of scope:** an administrator or root. Remora has no network surface: it opens no listening socket and makes no outgoing connection.
+- **Out of scope:** an administrator or root. Remora has no network surface: the daemon listens only on a local Unix socket or Windows named pipe, opens no network socket and makes no outgoing connection.
 
 Bugs in third-party dependencies should be reported upstream, but let us know if Remora is affected.
