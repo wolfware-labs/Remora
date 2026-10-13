@@ -68,7 +68,7 @@ Everything else is listed in §22 (D-01). The architecture leaves room for furth
 | **Blob** | A file's content stored under its SHA-256 hash (§7.2). |
 | **Store** | The manifests, blobs and stat cache of one project. |
 | **Blob home** | The directory holding a project's blobs, chosen per volume (§7.7). |
-| **Point** | A restore point: a snapshot with a kind, a time, a session and a label (§9.4). |
+| **Point** | A restore point: a snapshot with a kind, a time, a session and a label (§9.3). |
 | **Checkpoint** | A point taken before a command. |
 | **Safety snapshot** | The snapshot of the current tree that a rewind takes before changing anything. |
 | **Rewind** | Restoring a project to a point (§9.6). |
@@ -125,7 +125,7 @@ The workspace has these crates. An arrow means "depends on". Lower crates MUST N
 | `remora-host` | Claude Code adapter: payload parsing, event to request mapping, the per-event budget table. | `remora-types`, `remora-ipc` |
 | `remora-cli` (bin `remora`) | CLI, hook runner, `init`, service installers. Links `remora-daemon` as a library; `remora daemon` runs it. | all of the above |
 | `remora-testkit` | Test fixtures and harnesses. `publish = false`. Dev-dependency only. | any |
-| `xtask` | Repository checks (layering, golden generation). `publish = false`. | none at build time; reads `cargo metadata` |
+| `xtask` | Repository checks (layering, golden generation, CLI reference). `publish = false`. | none at build time; reads `cargo metadata` and runs generators that are examples of workspace crates (rule 5) |
 
 ```mermaid
 flowchart BT
@@ -150,10 +150,11 @@ flowchart BT
 
 Rules:
 
-1. `remora-ipc` MUST NOT depend on `remora-engine`, `remora-store` or `remora-journal`, and MUST NOT enable the `sqlite` feature of `remora-fs`. Wire types live in `remora-types`; the engine converts its own types to wire types at the daemon boundary.
+1. `remora-ipc` MUST NOT depend on `remora-engine`, `remora-store` or `remora-journal`. Only `remora-store` and `remora-journal` may enable the `sqlite` feature of `remora-fs` (D-80); every other edge to `remora-fs`, including the one from `remora-ipc`, MUST NOT name it. Wire types live in `remora-types`; the engine converts its own types to wire types at the daemon boundary.
 2. `remora-host` MUST NOT depend on `remora-daemon` or `remora-engine`. A hook client therefore does not link the engine's logic. (The binary still links everything, because it is one executable; §16.3 covers what this costs.)
 3. Only `remora-cli` installs a global logger. Library crates use the `log` facade.
-4. `xtask layers` (D-71) reads `cargo metadata --format-version 1` and fails if any normal or build dependency edge between workspace crates is not in the table above, or if an edge enables a feature the rules forbid (it reads each edge's `features` from the metadata; rule 1 forbids `remora-fs/sqlite` for `remora-ipc`). Dev-dependency edges to `remora-testkit` are allowed. CI runs it (§18).
+4. `xtask layers` (D-71) reads `cargo metadata --format-version 1` and fails if any normal or build dependency edge between workspace crates is not in the table above, or if an edge enables a feature the rules forbid (it reads each edge's `features` from the metadata and allows `remora-fs/sqlite` only on the edges of rule 1). Dev-dependency edges to `remora-testkit` are allowed. CI runs it (§18).
+5. Generators that need workspace types are examples of the crate that owns those types: `remora-types/examples/wire_golden.rs` writes the wire goldens (§17.4) and `remora-cli/examples/cli_docs.rs` renders the CLI reference from the `clap` definitions (§13.9). `xtask golden` and `xtask cli-docs` run them with `cargo run --locked --example` and write or compare the output, so `xtask` keeps no workspace dependency (D-87).
 
 ### 3.3 Concurrency model
 
@@ -162,7 +163,7 @@ Rules:
 - A project worker executes that project's requests strictly in arrival order. Different projects run in parallel.
 - A panic inside a request is caught at the worker boundary. The request is answered with `internal`, the worker drops its open project state, and the next request reopens it. A panic in one project MUST NOT affect requests for another project.
 - A worker exits after 30 minutes without requests and releases its project lock and database handles.
-- Only the daemon reads the wall clock for recorded times (D-05). Per project, a recorded time is `max(now_ms, last_ms + 1)`, where `last_ms` is the largest time recorded in that project, so recorded times are strictly increasing per project. When a project opens, `last_ms = max(points.at_ms, commands.at_ms, commands.ended_at_ms, open_turns.last_event_ms, ended_at_ms of the last entry)`. The clock is injected through a `Clock` trait.
+- Only the daemon reads the wall clock for recorded times (D-05). Per project, a recorded time is `max(now_ms, last_ms + 1)`, where `last_ms` is the largest time recorded in that project, so recorded times are strictly increasing per project. When a project opens, `last_ms = max(points.at_ms, commands.at_ms, commands.ended_at_ms, open_turns.last_event_ms, ended_at_ms of the last entry)`. The engine receives time as an injected `Clock` (the trait `remora_types::time::Clock`, with `now_ms` and a monotonic reading, §4); the daemon passes its system clock (`remora_daemon::clock::SystemClock`) and tests pass the manual clock of `remora-testkit`. The engine applies `max(now_ms, last_ms + 1)` when it assigns a request's recorded time, which happens when the request reaches the project worker (§9.2 rule 10).
 
 ### 3.4 Host adapters
 
@@ -172,7 +173,7 @@ An adapter maps host events to the host-neutral requests of §10 (`begin_turn`, 
 
 - Every crate sets `unsafe_code = "forbid"` except `remora-fs` (D-06).
 - In `remora-fs`, only the module `remora_fs::sys` and its submodules may contain `unsafe`. The rest of `remora-fs` sets `#![deny(unsafe_code)]` at module level and calls `sys` through safe functions.
-- `sys` is built on `rustix` (Unix) and `windows-sys` (Windows). `libc` MAY be used for the macOS calls `rustix` does not wrap (`fclonefileat`, `acl_set_fd_np`).
+- `sys` is built on `rustix` (Unix) and `windows-sys` (Windows). `libc` MAY be used for the macOS calls `rustix` does not wrap, and only for these: `fclonefileat` (§7.2), `acl_init`, `acl_set_fd_np` and `acl_free` (removing a blob's extended ACL, §7.9), `getentropy` (the random source) and `fpathconf` (case sensitivity, §5.6). Adding a call means adding it to this list (OQ-25).
 - Every `unsafe` block MUST carry a `// SAFETY:` comment stating the invariant it relies on, and every `sys` function MUST have its own unit tests on each OS where it compiles.
 - No code in the workspace starts a shell or an OS utility to read or change OS state (no `whoami`, `icacls`, `reg`, `id`, `powershell`, `cmd`). The only external programs Remora runs are `systemctl` (Linux) and `launchctl` (macOS) for service management, each call bounded by a 10 s timeout and its exit status checked (D-07).
 
@@ -180,48 +181,54 @@ An adapter maps host events to the host-neutral requests of §10 (`begin_turn`, 
 
 ## 4. Capability ownership
 
-A capability has exactly one owner. Other code MUST call the owner and MUST NOT reimplement the capability (D-08). The issue column links the issue that builds each capability.
+A capability has exactly one owner. Other code MUST call the owner and MUST NOT reimplement the capability (D-08). The roadmap column names the ROADMAP.md deliverable that builds each capability.
 
-| Capability | Owner (crate::module) | Issue |
+| Capability | Owner (crate::module) | Roadmap |
 |---|---|---|
-| Atomic write (temp, fsync, rename, fsync directory) | `remora_fs::atomic` | - |
-| Owner-only file and directory creation | `remora_fs::private` (Unix mode, Windows security descriptor via `sys`) | - |
-| Fsync policy and the list of durability points | `remora_fs::durable` | - |
-| Symlink-safe open, walk, unlink, rename | `remora_fs::nofollow` (on `sys::at`) | - |
-| Path canonicalization and case-folding comparison | `remora_fs::path` | - |
-| Quoting and unquoting command lines (POSIX shell, systemd `ExecStart`, Windows `CommandLineToArgvW` rules) | `remora_types::cmdline` (pure functions, called by `remora_fs::process` and `remora_cli::install`) | - |
-| Volume identity and same-volume test | `remora_fs::volume` | - |
-| ACL setup and verification (Windows), mode checks (Unix) | `remora_fs::acl` | - |
-| Detached process spawn | `remora_fs::sys::spawn` (safe wrapper `remora_fs::process`) | - |
-| File locks (instance, starter, project, data-dir) | `remora_fs::lock` | - |
-| Clock (trait in types, system and manual clocks in daemon) | `remora_types::time::Clock`, `remora_daemon::clock` | - |
-| Project id derivation | `remora_types::ids::ProjectId::derive` | - |
-| Config loading and reload | `remora_daemon::config` | - |
-| Blob hashing (SHA-256) | `remora_store::hash` | - |
-| Manifest codec and validation | `remora_store::manifest` | - |
-| Copy-on-write clone with copy fallback | `remora_store::put` (clone primitive in `remora_fs::sys::clone`) | - |
-| Journal canonical encoding | `remora_types::journal::encode` | - |
-| Signing keys (create, load, zeroize) | `remora_journal::key` | - |
-| Request ids and dedup window | `remora_ipc::request_id`, `remora_daemon::dedup` | - |
-| Paging cursors | `remora_engine::cursor` (opaque to everyone else) | - |
-| Error kinds | `remora_types::error::ErrorKind` | - |
-| Version comparison (`semver` crate) | `remora_types::version` | - |
-| Install-path discovery (stable executable path) | `remora_cli::install::exe` | - |
-| Hook settings editing (`settings.json`) | `remora_cli::install::settings` | - |
-| Service install per OS | `remora_cli::install::service` | - |
-| Ensure a current daemon (start or replace) | `remora_daemon::ensure` | - |
-| Logging backend and rotation | `remora_daemon::logfile` | - |
-| Text truncation at a UTF-8 boundary | `remora_types::text::cut` | - |
-| `.remora-ignore` parsing | `remora_types::ignore` (parses bytes; the file is read through `remora_fs`) | - |
-| Root resolution (git-root walk, refused roots) | `remora_fs::root` | - |
-| SQLite open and hardening (pragmas, owner-only pre-create, foreign-file refusal) | `remora_fs::sqlite`, behind the cargo feature `sqlite` that only `remora-store` and `remora-journal` enable (D-80) | - |
-| Endpoint derivation and socket-directory check | `remora_ipc::endpoint` | - |
-| Daemon secret and handshake | `remora_ipc::auth` | - |
-| OS random source (nonces, request ids, `turn_uid`, temporary and staging names) | `remora_fs::sys::random` | - |
-| Host event table | `remora_host::claude_code::EVENTS` | - |
-| Blob-home choice and checks | `remora_store::home` | - |
-| Test fixtures (trees, data dirs, in-process daemon, fake host payloads) | `remora-testkit` (D-55) | - |
-| Benchmarks | `remora-store/benches`, `remora-engine/benches` (fixtures from `remora-testkit`) | - |
+| Atomic write (temp, fsync, rename, fsync directory) | `remora_fs::atomic` | R0.7 |
+| Owner-only file and directory creation, and the scoped umask for binding a socket (§5.1 rule 5) | `remora_fs::private` (Unix mode, Windows security descriptor via `sys`) | R0.6 |
+| Fsync policy and the list of durability points | `remora_fs::durable` | R0.7 |
+| Symlink-safe open, walk, unlink, rename, recursive delete (§9.10 rule 4, §15.3 item 8), and setting a file's times (§5.5 rule 7) | `remora_fs::nofollow` (on `sys::at`) | R0.8a, R0.8b (Windows) |
+| Path canonicalization and case-folding comparison | `remora_fs::path` | R0.9a, R0.9b (case folding) |
+| Quoting and unquoting command lines (POSIX shell, systemd `ExecStart`, Windows `CommandLineToArgvW` rules) | `remora_types::cmdline` (pure functions, called by `remora_fs::process` and `remora_cli::install`) | R1.4 |
+| Volume identity and same-volume test | `remora_fs::volume` | R1.1 |
+| ACL setup and verification (Windows), mode checks (Unix) | `remora_fs::acl` | R3.2 |
+| Detached process spawn | `remora_fs::sys::spawn` (safe wrapper `remora_fs::process`) | R1.4 |
+| File locks (instance, starter, project, data-dir) | `remora_fs::lock` | R1.2 |
+| Clock trait | `remora_types::time::Clock` | R0.11 |
+| System clock | `remora_daemon::clock::SystemClock` | R1.19 |
+| Manual clock for tests | `remora-testkit` (`ManualClock`) | R0.10 |
+| Environment value (variables and home directory, §14.4) | `remora_types::env::Env` (the value, R0.11); `remora_fs::env::capture` (reads it from the running process, R1.1) | R0.11, R1.1 |
+| Project id derivation | `remora_types::ids::ProjectId::derive` | R0.11 |
+| Config loading and reload | `remora_daemon::config` | R5.1 |
+| Blob hashing (SHA-256) | `remora_store::hash` | R1.5 |
+| Manifest codec and validation | `remora_store::manifest` | R1.6 |
+| Copy-on-write clone with copy fallback | `remora_store::put` (clone primitive in `remora_fs::sys::clone`) | R1.5 (`put` and copy fallback), R3.1a, R3.1b (macOS), R3.1c (Windows) (clone primitive) |
+| Journal canonical encoding | `remora_types::journal::encode` | R0.12 |
+| Signing keys (create, load, zeroize) | `remora_journal::key` | R1.11 |
+| Request ids and dedup window | `remora_ipc::request_id`, `remora_daemon::dedup` | R1.18 (`request_id`), R4.2 (`dedup`) |
+| Replay of a retried `rewind` or `restore_snapshot` from its journal entry (§10.7) | `remora_engine::rewind` | R1.14 |
+| Pin rows (§9.9) | `remora_engine::pins` | R3.6a |
+| Injected services of the client roles (spawner, lock factory) passed to `hook::run` and `remora_cli::run` (§17.1 rule 1) | `remora_cli::Deps` (the `LockFactory` trait itself is in `remora_daemon::lifecycle`, R4.4) | R1.24 |
+| Paging cursors | `remora_engine::cursor` (opaque to everyone else) | R3.5 |
+| Error kinds | `remora_types::error::ErrorKind` | R0.11 |
+| Version comparison (`semver` crate) | `remora_types::version` | R4.3 |
+| Install-path discovery (stable executable path) | `remora_cli::install::exe` | R4.6 |
+| Hook settings editing (`settings.json`) | `remora_cli::install::settings` | R1.25 |
+| Service install per OS | `remora_cli::install::service` | R4.7a, R4.7b (macOS), R4.7c (Windows) |
+| Ensure a current daemon (start or replace) | `remora_daemon::ensure` | R1.22 |
+| Logging backend and rotation | `remora_daemon::logfile` | R1.20 |
+| Text truncation at a UTF-8 boundary | `remora_types::text::cut` | R0.11 |
+| `.remora-ignore` parsing | `remora_types::ignore` (parses bytes; the file is read through `remora_fs`) | R5.2 |
+| Root resolution (git-root walk, refused roots) | `remora_fs::root` | R1.1 |
+| SQLite open and hardening (pragmas, owner-only pre-create, foreign-file refusal) | `remora_fs::sqlite`, behind the cargo feature `sqlite` that only `remora-store` and `remora-journal` enable (D-80) | R1.3 |
+| Endpoint derivation and socket-directory check | `remora_ipc::endpoint` | R1.15 |
+| Daemon secret and handshake | `remora_ipc::auth` | R1.17 |
+| OS random source (nonces, request ids, `turn_uid`, temporary and staging names) | `remora_fs::sys::random` | R0.5 |
+| Host event table | `remora_host::claude_code::EVENTS` | R1.23 |
+| Blob-home choice and checks | `remora_store::home` | R3.3a, R3.3b (Windows), R3.3c (adoption) |
+| Test fixtures (trees, data dirs, in-process daemon, fake host payloads) | `remora-testkit` (D-55) | R0.10, R1.28 (in-process daemon, fake payloads) |
+| Benchmarks | `remora-store/benches`, `remora-engine/benches`, `remora-cli/benches/process.rs` (fixtures from `remora-testkit`) | R6.3 |
 
 ---
 
@@ -232,9 +239,10 @@ A capability has exactly one owner. Other code MUST call the owner and MUST NOT 
 ### 5.1 Owner-only creation
 
 1. Every directory Remora creates MUST be owner-only from the moment it exists, except the Windows restore staging directory (§7.6). On Unix it is created with `mkdirat(dirfd, name, 0o700)`. On Windows it is created with `CreateDirectoryW` and a security descriptor whose owner is the current user's SID and whose DACL is protected and grants full control to the user SID and `SYSTEM` only, inheritable to files and subdirectories.
-2. Every file Remora creates MUST be created with `O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC` and mode `0o600` on Unix. On Windows it inherits the DACL of its owner-only parent.
-3. Remora MUST NOT create a file or directory and restrict it afterwards. A `chmod` after creation is allowed only to restore a mode recorded in a manifest (§7.6).
+2. Every file Remora creates MUST be created with `O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC` and mode `0o600` on Unix. On Windows it inherits the DACL of its owner-only parent. The one exception is a clone on macOS (§7.2): `fclonefileat` creates its destination itself, with the source's mode, so the clone is made inside an owner-only directory (the `tmp/` directory of a blob home, or the restore staging directory) and its mode is set to `0o600` on its descriptor before anything reads or writes it.
+3. Remora MUST NOT create a file or directory and restrict it afterwards, except as rule 2 states. A `chmod` after creation is allowed only to restore a mode recorded in a manifest (§7.6).
 4. A restored project file gets its recorded mode on the open descriptor before the rename that makes it visible (§7.6).
+5. A Unix socket file gets its mode from the process umask at `bind`. The daemon binds through `remora_fs::private::with_umask(0o177, ...)`, which changes the umask under a process-wide mutex that every creation in `remora_fs::private` also takes, so no directory or file is created while the umask is changed (§10.2).
 
 ### 5.2 Checking existing state
 
@@ -257,18 +265,19 @@ A capability has exactly one owner. Other code MUST call the owner and MUST NOT 
 3. `renameat` the temporary file over `name`.
 4. `fsync` `dir`.
 
-On Windows, step 2 flushes through a writable handle (`FlushFileBuffers`), step 3 uses `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`, and step 4 is skipped: NTFS and ReFS journal the rename metadata.
+On Windows, step 2 flushes through a writable handle (`FlushFileBuffers`), step 3 is the handle rename of §5.9 rule 2 (`FileRenameInfoEx` with POSIX semantics, falling back to `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`), and step 4 is skipped: NTFS and ReFS journal the rename metadata.
 
-`create_exclusive_atomic(dir, name, bytes)` is the no-replace variant used for the machine key: steps 1 and 2, then `renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS, `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING` on Windows. If the filesystem does not support the no-replace rename, it falls back to `linkat` plus `unlinkat` of the temporary file. If neither works, it fails with `unsupported_filesystem`. If the target exists, the caller receives `AlreadyExists` and reads the existing file.
+`create_exclusive_atomic(dir, name, bytes)` is the no-replace variant used for the machine key: steps 1 and 2, then `renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS, and on Windows the handle rename of §5.9 rule 2 without `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` (falling back to `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`). If the filesystem does not support the no-replace rename, it falls back to `linkat` plus `unlinkat` of the temporary file. If neither works, it fails with `unsupported_filesystem`. If the target exists, the caller receives `AlreadyExists` and reads the existing file.
 
 ### 5.5 Symlink-safe access
 
 1. A project tree is walked through directory descriptors, starting from a descriptor of the root. Each subdirectory is opened with `openat(parent, name, O_DIRECTORY | O_NOFOLLOW)` (Unix) or relative to the parent handle with `FILE_FLAG_OPEN_REPARSE_POINT` and a check that the result is not a reparse point (Windows).
-2. A symlink is recorded as a symlink and never followed. On Windows, symbolic links and junctions are both recorded as symlinks; other reparse points are recorded as `opaque`.
+2. A symlink is recorded as a symlink and never followed. On Windows, symbolic links and junctions are both recorded as symlinks, except a mount-point reparse point whose target is a volume GUID path (`\??\Volume{...}\`): that is another volume mounted on a folder and is recorded as `opaque {other_filesystem}` (rule 4). Other reparse points are recorded as `opaque`.
 3. A regular file is opened for reading with `O_NOFOLLOW | O_NONBLOCK`, then `fstat` MUST show a regular file with the same device and inode as the walk saw. Otherwise the entry is treated as changed during the snapshot and recorded as unprotected for this snapshot.
 4. The walk MUST NOT cross into another filesystem. A directory whose device differs from the root's is recorded as `opaque` and neither entered nor touched by restore (D-59). A btrfs subvolume has its own `st_dev`, so a subvolume inside a project is `opaque` too; `status` lists such directories.
 5. Restore writes, renames, deletes and mode changes MUST go through the descriptor of the parent directory, opened by the same no-follow walk from the root. Before each write the restore re-opens the parent chain and refuses to continue below any component that is not a real directory (§7.6).
 6. Same-user races (an agent swapping a directory for a symlink between two system calls) are reduced by these rules but not excluded. §15.4 lists the residual.
+7. Setting a file's times (the touch of a hook marker, §12.6 rule 6) goes through the parent's descriptor without following a symlink: `utimensat` with `AT_SYMLINK_NOFOLLOW` on Unix; on Windows `SetFileTime` on a handle opened relative to the parent with `FILE_FLAG_OPEN_REPARSE_POINT`.
 
 ### 5.6 Canonicalization
 
@@ -277,7 +286,7 @@ On Windows, step 2 flushes through a writable handle (`FlushFileBuffers`), step 
 3. Windows: open the path and call `GetFinalPathNameByHandleW` with `FILE_NAME_NORMALIZED`. Strip the `\\?\` prefix for drive paths, keep `\\?\UNC\` as `\\server\share`, upper-case the drive letter. `subst` drives resolve to their target.
 4. A path that does not exist is canonicalized by canonicalizing its deepest existing ancestor and appending the remaining components unchanged.
 5. Canonical paths MUST be valid UTF-8 to be used as a root, a data directory or a blob home. A non-UTF-8 root is not recorded (§12.6).
-6. Case-folding comparison (`path::eq_on(volume, a, b)`) compares component by component when the volume is case-insensitive: on macOS after NFD normalization plus simple Unicode case folding (case-insensitive APFS is also normalization-insensitive); on Windows with `CompareStringOrdinal(a, b, TRUE)` (NTFS's own upcase table); elsewhere with simple Unicode case folding. Case sensitivity is read per directory: `pathconf(_PC_CASE_SENSITIVE)` on macOS, `FILE_CASE_SENSITIVE_INFO` per directory and `FILE_CASE_SENSITIVE_SEARCH` per volume on Windows, case-sensitive on Linux unless the directory has the casefold attribute (`FS_CASEFOLD_FL`).
+6. Case-folding comparison (`path::eq_on(rule, a, b)`, where `rule` is the `CaseRule` that `path::case_rule(dir)` reads from the directory holding the names) compares component by component when the rule is case-insensitive: on macOS after NFD normalization plus simple Unicode case folding (case-insensitive APFS is also normalization-insensitive); on Windows with `CompareStringOrdinal(a, b, TRUE)` (NTFS's own upcase table); elsewhere with simple Unicode case folding. Case sensitivity is read per directory: `fpathconf(_PC_CASE_SENSITIVE)` on macOS, `FILE_CASE_SENSITIVE_INFO` per directory and `FILE_CASE_SENSITIVE_SEARCH` per volume on Windows, case-sensitive on Linux unless the directory has the casefold attribute (`FS_CASEFOLD_FL`).
 
 ### 5.7 Volume identity
 
@@ -333,7 +342,7 @@ These rules apply to every Windows open, rename and delete in a project tree, a 
 
 `--data-dir <DIR>` or the environment variable `REMORA_DATA_DIR` overrides it, for every command including `init`, `service` and `daemon`. A non-default data directory is written into the hook command and the service definition (§13.4), so all three roles agree.
 
-`<data>` MUST be on a local filesystem: on Linux, `statfs` `f_type` MUST NOT be NFS, SMB2 or CIFS; on macOS the mount MUST have `MNT_LOCAL`; on Windows `GetDriveTypeW` MUST NOT be `DRIVE_REMOTE`. Otherwise the daemon refuses to start with `unsafe_data_dir {reason: "network"}`. Moving the data directory, or reaching it through a different canonical path, changes the `<home>` name and the `owner.json` check of every blob home on another volume (§7.7): those projects become `blob_store_unavailable {reason: "foreign_owner"}`, and `status` names the data directory recorded in `owner.json` with the hint `remora forget` (OQ-43). `<data>` is canonicalized once at daemon start; all later paths derive from the canonical form.
+`<data>` MUST be on a local filesystem: on Linux, `statfs` `f_type` MUST NOT be NFS, SMB2 or CIFS; on macOS the mount MUST have `MNT_LOCAL`; on Windows `GetDriveTypeW` MUST NOT be `DRIVE_REMOTE`. Otherwise the daemon refuses to start with `unsafe_data_dir {path, reason: "network"}`. Moving the data directory, or reaching it through a different canonical path, changes the `<home>` name and the `owner.json` check of every blob home on another volume (§7.7): those projects become `blob_store_unavailable {path, reason: "foreign_owner"}`, and `status` names the data directory recorded in `owner.json` with the hint `remora forget`, which removes the project's records and leaves that blob home for the user to delete (§9.10 rule 7, OQ-43). `<data>` is canonicalized once at daemon start; all later paths derive from the canonical form.
 
 ### 6.2 Layout
 
@@ -351,13 +360,13 @@ These rules apply to every Windows open, rename and delete in a project tree, a 
   daemon.failed                       last start failure, deleted by a serving daemon (§11.11)
   projects.lock                       data-dir lock (§9.12)
   install.lock                        serializes edits of settings.json and service definitions (§12.5)
-  janitor.json                        {"last_prune_ms": i64}
+  janitor.json                        {"layout":1,"last_prune_ms":i64}
   logs/daemon.log, logs/daemon.log.1  daemon log, rotated at 10 MiB
   logs/hook.log, logs/hook.log.1      hook log, rotated at 10 MiB
   hook/sessions/<session-id>          session root marker (§12.6)
   hook/warnings/<session-id>.<reason> once-per-session warning marker (§12.8)
   projects/<id>/                      0700
-    project.json                      {"layout":1,"root":"<canonical root>","blob_home":"<abs path>"|null,"blob_home_reason":"<code>"|null}  (§7.7)
+    project.json                      {"layout":1,"root":"<canonical root>","blob_home":"<abs path>"|null,"blob_home_reason":"<code>"}  (§7.7)
     journal.db                        SQLite: journal, points, open turns, intent, pins (§8)
     journal.head                      signed head checkpoint (§8.6)
     cache.db                          SQLite: stat cache (§7.4), disposable
@@ -375,7 +384,7 @@ Rules:
 1. `layout.json` names the layout version. A daemon that finds a higher layout version than it supports MUST refuse to start with `format_too_new` and change nothing.
 2. `<data>` MUST NOT be inside, equal to, or an ancestor of any recorded root. The engine checks this at every project open with canonical paths and the case-folding comparison of §5.6. A violating root is refused with `root_overlaps_data_dir` (D-09).
 3. A store (blob home) MUST NOT be inside its project's root (§7.7).
-4. No file in `<data>` is written outside `write_atomic`, `create_exclusive_atomic` (the machine key and the `hook/` markers), `O_APPEND` writes (`machine.keys.log` and the log files), SQLite, the lock files and the socket.
+4. No file in `<data>` is written outside `write_atomic`, `create_exclusive_atomic` (the machine key and the `hook/` markers), the blob sequence of §7.2 (exclusive temporary file in `blobs/tmp/`, then rename into place), renames of corrupt blobs into `blobs/quarantine/` (§7.10), renames of log files at rotation (§11.9), `O_APPEND` writes (`machine.keys.log` and the log files), SQLite, the lock files and the socket.
 
 ### 6.3 Project identity
 
@@ -415,20 +424,20 @@ A snapshot is a manifest plus the blobs it references. Blobs are content-address
 pub trait Snapshotter {
     fn snapshot(&self, root: &RootDir, opts: &SnapshotOptions) -> Result<Snapshot, StoreError>;
     fn manifest(&self, id: &SnapshotId) -> Result<Manifest, StoreError>;
-    fn compute_restore(&self, root: &RootDir, target: &SnapshotId, opts: &SnapshotOptions)
-        -> Result<RestoreSet, StoreError>;
+    fn compute_restore(&self, root: &RootDir, current: &Snapshot, target: &SnapshotId,
+        opts: &SnapshotOptions) -> Result<RestoreSet, StoreError>;
     fn stage(&self, set: &RestoreSet) -> Result<Staged, StoreError>;
     fn apply(&self, staged: Staged) -> Result<RestoreReport, StoreError>;
 }
 ```
 
-`Snapshot` carries the snapshot id, counters (`entries`, `hashed_files`, `stored_files`, `cloned_files`, `bytes_read`) and the unprotected paths (capped at 1,000, with a total count). When a point's snapshot completes, its unprotected paths replace the rows of the `unprotected` table in `cache.db` (§7.4), and the `unprotected_meta` row of `cache.db` records the total and the snapshot id. After `cache.db` is rebuilt, `status` reports the unprotected list as `unknown` until the next point is taken. "The last snapshot" in `status` means the snapshot of the newest point.
+`Snapshot` carries the snapshot id, counters (`entries`, `hashed_files`, `stored_files`, `cloned_files`, `bytes_read`, `stored_bytes` for the bytes of newly written blobs, and `manifest_bytes_written`, 0 when the manifest id already existed), the unprotected paths (capped at 1,000, with a total count), and its scan: per key, the node and the size, mtime and file id the walk saw. `compute_restore` takes the current tree from `current`, the scan of the snapshot the caller has just taken (§7.6), and apply rule 5 of §7.6 compares against the same scan. When a point's snapshot completes, its unprotected paths replace the rows of the `unprotected` table in `cache.db` (§7.4), and the `unprotected_meta` row of `cache.db` records the total and the snapshot id. After `cache.db` is rebuilt, `status` reports the unprotected list as `unknown` until the next point is taken. "The last snapshot" in `status` means the snapshot of the newest point.
 
 ### 7.2 Blobs
 
 1. A blob's id is the lowercase hex SHA-256 of its content. It is stored at `<blob home>/<first 2 hex>/<remaining 62 hex>`.
 2. Blobs are written only through this sequence (D-11):
-   1. Create `<blob home>/tmp/.blob.<random>.tmp` exclusively (§5.3).
+   1. Create `<blob home>/tmp/.blob.<random>.tmp` exclusively (§5.3). On macOS this step and the clone of step 2 are one call: `fclonefileat` creates the temporary itself (an existing name fails with `EEXIST`, and a new name is drawn as in §5.3), then the clone's mode is set to `0o600` on its descriptor (§5.1 rule 2).
    2. Clone the source file into it through the source's open descriptor (§7.5, D-52). If cloning fails for any reason, copy the bytes from the same descriptor into a fresh temporary file (a failed clone on Windows can leave its target pending deletion, so the copy never reuses the failed name).
    3. Stamp the temporary file's mtime with the current time. On macOS, remove its extended attributes and its extended ACL, best-effort (§7.9).
    4. `fsync` it through a writable handle (F1).
@@ -445,21 +454,21 @@ A manifest is a UTF-8 JSON document. Its id is the lowercase hex SHA-256 of its 
 Encoding (fixed, so identical trees give identical ids):
 
 ```json
-{"format":1,"root_missing":false,"options":{"exclude_names":["node_modules",".venv","target"],"exclude_paths":[],"max_file_bytes":104857600},"nodes":[
+{"format":1,"root_missing":false,"options":{"exclude_names":[".venv","node_modules","target"],"exclude_paths":[],"max_file_bytes":104857600},"nodes":[
+ ["link","symlink",{"target":"src/main.rs","dir":false}],
+ ["mnt","opaque",{"why":"other_filesystem"}],
  ["src","dir",{"mode":493}],
- ["src/main.rs","file",{"hash":"9f86d0...","size":1204,"mode":420,"stored":true}],
- ["link","symlink",{"target":"src/main.rs"}],
- ["mnt","opaque",{"why":"other_filesystem"}]
+ ["src/main.rs","file",{"hash":"9f86d0...","size":1204,"mode":420,"stored":true}]
 ]}
 ```
 
 Rules:
 
-1. Object keys appear in the order shown. `nodes` is sorted by the key's bytes. The stored form contains no whitespace outside strings; the example above is wrapped for reading.
+1. Object keys appear in the order shown. `nodes` is sorted by the key's bytes. `exclude_names` and `exclude_paths` are sorted by their bytes, without duplicates, so the order of a configuration list never changes an id. The stored form contains no whitespace outside strings; the example above is wrapped for reading. Strings are written as the compact writer of `serde_json` writes them: `"` and `\` as `\"` and `\\`, U+0008, U+0009, U+000A, U+000C and U+000D as `\b`, `\t`, `\n`, `\f` and `\r`, any other character below U+0020 as `\u00xx` with lowercase hex digits, and every other character, including `/` and non-ASCII, as its UTF-8 bytes. Integers are decimal, without sign or leading zeros.
 2. A key is a relative path with `/` separators. Each component is non-empty, is not `.` or `..`, contains no `/`, no NUL, and on Windows no `\`, `:` or a reserved device name (`CON`, `PRN`, `AUX`, `NUL`, `COM1` to `COM9`, `LPT1` to `LPT9`, with or without an extension).
 3. Every proper ancestor of a key MUST be a `dir` node in the same manifest.
 4. `hash` is 64 lowercase hex characters. `mode` is an integer in `0..=0o1777`. `size` is a non-negative integer.
-5. Node types: `dir {mode}`, `file {hash, size, mode, stored}`, `symlink {target}` (target is UTF-8, stored as read), `opaque {why}` where `why` is one of `other_filesystem`, `special` (FIFO, socket, device), `reparse_point`, `unreadable`, `path_too_long`, `changed_during_snapshot`.
+5. Node types: `dir {mode}`, `file {hash, size, mode, stored}`, `symlink {target, dir}` (target is UTF-8, stored as read; `dir` is true for a Windows directory symlink or junction and false for every other link, on Unix always false; restore uses it on Windows to create a file or directory symlink, §7.9), `opaque {why}` where `why` is one of `other_filesystem`, `special` (FIFO, socket, device), `reparse_point`, `unreadable`, `path_too_long`, `changed_during_snapshot`.
 6. `options` records the exclusions and the size limit the snapshot was taken with (§7.8).
 7. On load, a manifest MUST be validated: its id equals the SHA-256 of the bytes read, it parses with exactly this schema (unknown fields are an error), and rules 2 to 4 hold. A manifest failing validation is reported as `store_damaged` and is never used for a restore.
 8. On a case-insensitive volume, a manifest with two keys equal under the volume's comparison (§5.6 rule 6, which on macOS includes Unicode normalization) MUST NOT be restored (it cannot come from a scan of that volume).
@@ -470,6 +479,11 @@ Rules:
 A snapshot must not re-read unchanged files (D-14). The stat cache in `cache.db` maps a path to the hash of the content seen with given metadata:
 
 ```sql
+PRAGMA application_id = 1380799043;   -- 0x524D5243, "RMRC"
+
+CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
+  -- keys: schema_version ('1' in v1, §6.4)
+
 CREATE TABLE stat (
   path      BLOB PRIMARY KEY,   -- manifest key bytes
   size      INTEGER NOT NULL,
@@ -499,7 +513,7 @@ Rules:
 3. A cache row whose hash is malformed is ignored and replaced.
 4. Oversized files are cached by metadata like other files (`stored = 0`), so an unchanged large file is not re-hashed.
 5. Removing a blob (prune, quarantine, forget) deletes the cache rows that reference it in the same critical section.
-6. `cache.db` is disposable. If it is missing, damaged, foreign or of another schema version, it is deleted and rebuilt empty. Its loss costs one full re-hash, never correctness.
+6. `cache.db` is disposable. If it is missing, damaged, foreign (another `application_id`) or of another schema version (`meta.schema_version`), it is deleted and rebuilt empty. Its loss costs one full re-hash, never correctness.
 7. The cache is per project and written only by that project's worker.
 8. On Windows, the walk reads size, times and file ids from the directory enumeration (`GetFileInformationByHandleEx` with `FileIdExtdDirectoryInfo` on the directory handle), so a cache hit costs no per-file open. On Unix, a cache hit costs one `fstatat` per entry.
 
@@ -522,10 +536,10 @@ The cost of a snapshot is therefore one metadata record per entry plus reading, 
 
 Restore never trusts the store (D-13). It runs in three phases: compute, stage, apply. Nothing in the project tree changes before apply.
 
-**Compute.** `compute_restore(root, target)`:
+**Compute.** `compute_restore(root, current, target)`:
 
 1. Load and validate the target manifest (§7.3). Failure: `store_damaged`.
-2. Snapshot the current tree into a fresh scan (no store writes; the caller has already taken the safety snapshot, §9.6) and compute, per key:
+2. Take the current tree from `current`, the scan of the snapshot the caller has just taken: the safety snapshot for a rewind (§9.6 step 4), the preview snapshot for a preview (§9.5). One walk serves both; there is no second scan. Compute, per key:
    - `restore`: present in the target, absent now;
    - `revert`: present in both with a different type, content or mode;
    - `delete`: absent in the target, present now;
@@ -556,8 +570,9 @@ Rules for every apply step:
 2. On a case-insensitive volume, the existence checks and the ancestor rule use the case-folding comparison.
 3. Restore never sets the set-user-id or set-group-id bits. A recorded mode is applied as `mode & 0o1777`.
 4. Restored files get the current time as mtime (§7.9).
-5. Before deleting or replacing a key, apply compares its current size, mtime and file id with the compute scan. A difference (a write after the safety snapshot, for example by an agent running during a `--force` rewind) fails that key with `changed_during_rewind`; the newer content is left in place.
+5. Before deleting or replacing a key, apply compares its current size, mtime and file id with the compute scan, which is the safety snapshot's scan. A difference (a write after the safety snapshot, for example by an agent running during a `--force` rewind) fails that key with `changed_during_rewind`; the newer content is left in place.
 6. Each key that fails is recorded in `failed` with an error code (§10.12) and the restore continues with the next key. The caller decides what a partial apply means (§9.6).
+7. A manifest whose own keys break rule 2 or 8 of §7.3 is refused as a whole at compute (`store_damaged`). The per-key codes cover what only the current tree shows: `case_collision` for a key to create that equals, under the volume's comparison, a current entry that restore leaves in place (excluded, `opaque`, unstored or not recorded); `reserved_name` for a create the OS refuses because it treats the name as a device name (for example a name with trailing dots or spaces that §7.3 rule 2 does not list). On Windows apply also checks each key against the list of §7.3 rule 2 right before its create.
 
 `RestoreReport` carries counts (`restored`, `reverted`, `deleted`, `cloned`, `skipped`, `failed`, `unrestorable`) and the lists of `skipped`, `failed` and `unrestorable` keys. On the wire these lists are capped (§10.8).
 
@@ -574,7 +589,7 @@ Clones work only within one volume, so a project on another volume than `<data>`
 
 `<home>` is `<id>-<first 16 hex of SHA-256(canonical data dir)>`, so two data directories that record the same root never share a blob home (D-74). The home directory holds `owner.json` = `{"layout":1,"data_dir":"<canonical data dir>","project_id":"<id>"}`, written with `write_atomic` (F4) when the home is created. At every open the daemon compares it with the opening data directory and project; a mismatch is `blob_store_unavailable {reason: "foreign_owner"}`.
 
-The blob home is chosen once, when the project is created under `projects.lock`, and recorded in `project.json` with `blob_home_reason` (`same_volume`, `anchor`, `volume_root`, `no_safe_anchor`, `network_volume`, `root_is_volume_root`, `check_failed`). Later opens use the recorded home. If the recorded blob home is missing or fails its checks, every snapshot and restore for the project fails with `blob_store_unavailable {path}`. Remora MUST NOT switch to another blob home silently.
+The blob home is chosen once, when the project is created under `projects.lock`, and recorded in `project.json` with `blob_home_reason` (`same_volume`, `anchor`, `volume_root`, `no_safe_anchor`, `network_volume`, `root_is_volume_root`, `check_failed`). `blob_home_reason` is never null. `blob_home` is null exactly when the store is the data directory store (`<data>/projects/<id>/blobs`, reasons `same_volume`, `no_safe_anchor`, `network_volume`, `root_is_volume_root`, `check_failed`), so moving the data directory does not invalidate those projects; for `anchor` and `volume_root` it is the absolute path of the home's `blobs` directory. Any other combination makes `project.json` invalid (`corrupt_state`). Later opens use the recorded home. If the recorded blob home is missing or fails its checks, every snapshot and restore for the project fails with `blob_store_unavailable {path, reason}`, where `reason` is `missing`, `foreign_owner` (its `owner.json` names another data directory or project) or `check_failed`. Remora MUST NOT switch to another blob home silently.
 
 #### 7.7.1 Unix anchor
 
@@ -586,11 +601,12 @@ Given the canonical root `R`, the data directory `D` and the effective user id `
 4. If no such `A` exists, use the data directory store with reason `no_safe_anchor`. `status` names the folder that ruled the choice out (writable by others, or owned by another user), so a volume on a system with umask `002` is explained.
 5. `<A>/.remora-store` is created owner-only (`0o700`), contains a `.gitignore` with the single line `*`, and holds one `<home>` directory per project and data directory.
 6. At every project open, the daemon re-checks `A`'s ancestors (rule 3), and that `.remora-store`, `<home>` and `blobs` are real directories owned by `U` with no group or other access. Failure: `blob_store_unavailable`.
+7. Rules 2 to 5 apply only to a root on a local filesystem. After rule 1, a root on a network filesystem (the tests of §6.1 applied to the root's volume) uses the data directory store with reason `network_volume`.
 
 #### 7.7.2 Windows volume root
 
 1. If the volume serial of the root equals that of `<data>`, use the data directory store.
-2. `M` is the volume mount path of the root (`GetVolumePathNameW`). If the root is a UNC path, on a network volume (`GetDriveTypeW` is `DRIVE_REMOTE`) or `M` equals the root, use the data directory store.
+2. `M` is the volume mount path of the root (`GetVolumePathNameW`). If the root is a UNC path or on a network volume (`GetDriveTypeW` is `DRIVE_REMOTE`), use the data directory store with reason `network_volume`; if `M` equals the root, with reason `root_is_volume_root`.
 3. `M\.remora-store-<SID>` is created with the security descriptor of §5.1 in the same call (`CreateDirectoryW` with `SECURITY_ATTRIBUTES`), so there is no window in which it exists with another DACL. `<SID>` is the string SID of the current process token's user (`GetTokenInformation(TokenUser)`). An elevated process uses the same user SID and sets it explicitly as owner.
 4. At every open, `.remora-store-<SID>`, `<home>` and `blobs` MUST each be a real directory (no reparse point), owned by the user SID, with a protected DACL whose entries grant access to the user SID and `S-1-5-18` (SYSTEM) only. Comparison is by SID. Failure: `blob_store_unavailable`.
 
@@ -660,7 +676,7 @@ Because blobs carry no extended attributes or ACLs, a restored file never inheri
 Each project has one SQLite database, `journal.db` (D-15). It holds the signed hash chain and the unsigned operational tables the engine needs. The signed chain is the record; the operational tables are an index and a work area that `verify` cross-checks against the chain (D-51).
 
 ```sql
-PRAGMA application_id = 1380798017;   -- 0x524D5241, "RMRA"
+PRAGMA application_id = 1380799041;   -- 0x524D5241, "RMRA"
 
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
   -- keys: project_id, root, created_by (remora version),
@@ -760,11 +776,11 @@ CREATE TABLE store_stats (
 );
 ```
 
-Schema version 1 contains all the tables and fields above, including `late`, `late_start`, `implicit`, `interrupted`, `incomplete`, `tool_use_id` and the rewind targets, so no migration is needed before the first format change (D-18).
+Schema version 1 contains all the tables and columns above, including `late`, `late_start`, `implicit`, `tool_use_id`, `damaged` and the rewind intent fields, and entry format 1 (§8.4.2) carries `interrupted`, `incomplete` and the rewind targets in the signed body, so no migration is needed before the first format change (D-18).
 
 ### 8.2 SQLite settings
 
-Every connection MUST set, before any other statement (D-19):
+Every connection MUST set these before any statement that reads or writes the database's tables (D-19). One exception keeps a foreign file untouched: on an existing file, the read-write open sets `journal_mode` only after the read-only check of §8.3 rule 2 has passed, because switching a rollback-journal file to WAL rewrites its header.
 
 | Setting | Value | Why |
 |---|---|---|
@@ -777,15 +793,15 @@ Every connection MUST set, before any other statement (D-19):
 | `PRAGMA busy_timeout` | `5000` | |
 | Extension loading | disabled (not compiled in) | |
 
-`journal.db`, its `-wal` and `-shm` files are created owner-only: the database file is pre-created with `create_private_file` before SQLite opens it, and SQLite creates the side files with the database file's mode on Unix.
+`journal.db`, its `-wal` and `-shm` files are created owner-only: the database file is pre-created with `create_private_file` before SQLite opens it, and SQLite creates the side files with the database file's mode on Unix. A read-only open (§8.3 rule 3) may create a missing `-wal` or `-shm` file when the directory is writable [verify]; it gets the same mode, and nothing is written to the database file.
 
 SQLite is bundled (`rusqlite` with `bundled`), so every platform runs the same SQLite version.
 
 ### 8.3 Opening, versioning and migration
 
-1. **Open for writing** (daemon only): create the file if missing, then in one `BEGIN IMMEDIATE` transaction: if the database has no tables, create the schema, set `application_id`, insert `schema_version (1, ...)`, set `PRAGMA user_version = 1`, fill `meta`. Creation and version stamping are one transaction, so a crash or two concurrent first opens leave either nothing or a complete version 1 database. A test opens the same new file from 8 threads at once.
-2. **Refuse foreign files:** an existing database whose `application_id` is not `0x524D5241`, or that lacks the `entries` table, is refused with `foreign_database` and never modified.
-3. **Open read-only** (`verify`, diagnostics): `mode=ro` URI, fails with `not_found` if the file does not exist, never creates or writes anything.
+1. **Open for writing** (daemon only): create the file if missing, then in one `BEGIN IMMEDIATE` transaction: if the database has no tables, create the schema, set `application_id`, insert `schema_version (1, ...)`, set `PRAGMA user_version = 1`, fill `meta` (including `verifying_keys` with the machine public key from `seq` 1, §8.5 rule 5; the caller passes the key). Creation and version stamping are one transaction, so a crash or two concurrent first opens leave either nothing or a complete version 1 database. A test opens the same new file from 8 threads at once.
+2. **Refuse foreign files:** before an existing, non-empty file is opened for writing, a read-only connection checks that its `application_id` is `0x524D5241` and that it has the `entries` table. Otherwise the open fails with `foreign_database` and the file is never modified.
+3. **Open read-only** (`verify`, diagnostics, the check of rule 2): `mode=ro` URI, fails with `not_found` if the file does not exist, never creates the database file or writes to it (side files: §8.2).
 4. **Versions:** the current schema version is `MAX(version)` of `schema_version`, and MUST equal `PRAGMA user_version`. A mismatch is `corrupt_state`. A version higher than the binary supports is refused with `format_too_new` and nothing is written.
 5. **Migrations** are forward-only. Migration `n` to `n+1` runs in one `BEGIN IMMEDIATE` transaction that changes the schema, inserts the `schema_version` row and sets `user_version`. A failed migration rolls back completely and the open fails with the cause. Read-only opens accept every version from 1 to the current one. v1 ships with no migrations; the mechanism and its test (a synthetic migration in the test suite applied to a version 1 fixture) exist from v1.
 6. Signed entries are never rewritten by a migration. New entry fields require a new `entry_format` (§8.4.4).
@@ -877,7 +893,7 @@ Verification uses `verify_strict`. The domain strings make an entry hash unusabl
 2. Creation: generate the seed from the OS random source, write it with `create_exclusive_atomic` (§5.4). If the call reports `AlreadyExists`, another process won the race: read and use the existing key. A crash after the key is created and before its public key is appended to `machine.keys.log` is covered by rule 7, which appends it at the next open.
 3. Loading: the file MUST be exactly 32 bytes. Any other length is `invalid_key`, and Remora MUST NOT overwrite the file.
 4. The seed is held in a type that zeroizes on drop and implements neither `Debug` nor `Display`.
-5. `meta.verifying_keys` records, per journal, each public key used and the first `seq` it signed: `[{"from_seq": 1, "key": "<64 hex>"}]`. When a project opens and the machine key's public key differs from the last entry of the list, the daemon appends `{"from_seq": <next seq>, "key": ...}` (D-82).
+5. `meta.verifying_keys` records, per journal, each public key used and the first `seq` it signed: `[{"from_seq": 1, "key": "<64 hex>"}]`. The bootstrap transaction (§8.3 rule 1) writes the first item with the machine public key. When a project opens and the machine key's public key differs from the last entry of the list, the daemon appends `{"from_seq": <next seq>, "key": ...}` (D-82).
 6. All journals of the data directory share the key. If `machine.key` is lost, a new key is created; existing entries still verify with the key recorded for their `seq`, and `verify` reports the change as `key_changed {seq}`.
 7. `<data>/machine.keys.log` holds every public key this data directory has used, one line of 64 lowercase hex characters each (D-85). At every `Engine::open`, if the machine public key is not in the log, it is appended before anything is signed. A missing log is recreated holding only the current key, and `status` reports the recreation once. Appends open the owner-only file with `O_APPEND | O_NOFOLLOW` (created with `create_private_file` if missing), write one line, and `fsync` (F12). Lines that are not 64 lowercase hex characters are ignored and reported by `status`.
 
@@ -949,7 +965,7 @@ The journal detects accidental damage and partial tampering: an edited entry, a 
 
 ## 9. Engine
 
-`remora-engine` holds the project state machine. It has no clock (callers pass recorded times), no transport and no host knowledge.
+`remora-engine` holds the project state machine. It reads time only through the `Clock` the daemon injects (§3.3), and has no transport and no host knowledge.
 
 ### 9.1 Projects
 
@@ -1028,7 +1044,7 @@ Preview and rewind return the commands recorded at or after the point: every `co
 2. Compute the restore set from the current snapshot to the point (§7.6, compute phase only).
 3. Return the lists `restore`, `delete`, `revert`, `unrestorable`, `skipped` (each capped, §10.8), `commands_after`, the point (with `late`), `current_snapshot` (pinned) and `restore_digest`.
 
-`restore_digest` is the SHA-256 of the sorted list of `(list name, key, target)` tuples of `restore`, `revert` and `delete`, each tuple encoded with the primitives of §8.4.1 (`str`, `str`, `str`). `target` is the target node's type, followed for files by `:` and the content hash, and for every node by `:` and its mode in octal; for `delete` it is `absent`. A mode-only revert therefore changes the digest. It identifies what the rewind will change, not the whole tree.
+`restore_digest` is `SHA-256("remora/restore-digest/v1" || 0x00 || tuples)`, where `tuples` is the list of `(list name, key, target)` tuples of `restore`, `revert` and `delete`, sorted by the bytes of list name and then of key, encoded with the primitives of §8.4.1 as `list<T>` (a `u32` count, then each tuple as three `str`). `target` describes the target node: `file:<hash>:<mode>`, `dir:<mode>`, `symlink:<f or d>:<target>` (`d` when the node's `dir` is true), and `absent` for `delete`; `<mode>` is the recorded mode in octal digits without prefix or leading zeros (`644`, `1777`). A mode-only revert and a changed link target therefore change the digest. It identifies what the rewind will change, not the whole tree.
 
 A preview never changes the project tree, the journal or the points. The rewind that follows carries `expect_digest = restore_digest`. The daemon recomputes the restore set from the safety snapshot and refuses the rewind with `preview_stale` only if the digest differs, so what the user confirmed is what happens, while changes outside the restore set (an editor refreshing `.git/index`, a log file) do not refuse it; the safety snapshot captures them (D-65).
 
@@ -1050,8 +1066,8 @@ sequenceDiagram
   CLI->>CLI: confirm y/N (or --yes)
   CLI->>D: rewind {point_id, expect_snapshot, expect_digest, force}
   D->>D: check recovery state, open turns, point, pruned
-  D->>S: safety snapshot
-  D->>S: compute restore set (validate manifest, blobs exist)
+  D->>S: safety snapshot (its scan is the compute baseline)
+  D->>S: compute restore set from that scan (validate manifest, blobs exist)
   D->>D: digest == expect_digest? else preview_stale
   D->>J: insert before_rewind point, pin last_safety
   D->>J: commit intent record
@@ -1067,14 +1083,14 @@ Steps and their failure rules:
 | Step | On failure |
 |---|---|
 | 1. Project in recovery (§9.7) | `recovery_required {safety_snapshot}` |
-| 2. Open turns and `force = false` | `turn_in_progress {sessions}` with up to 20 sessions: id, start time, last event time, last command, age of the transcript file's last modification when `transcript_path` is known |
+| 2. Open turns and `force = false` | `turn_in_progress {sessions, sessions_total}` with up to 20 open-session items (§9.13), each with `transcript_mtime_ms`, the transcript file's modification time, when `transcript_path` is known and the file can be read |
 | 3. Point lookup (`point_id`, `expect_snapshot`) | `unknown_point`; a pruned point: `pruned {pruned_at_ms}` |
 | 4. Safety snapshot | `snapshot_failed`; nothing changed |
-| 5. Compute the restore set from the safety snapshot (validate manifest, every needed blob exists) | `store_damaged`; nothing changed |
+| 5. Compute the restore set from the safety snapshot's scan (validate manifest, every needed blob exists) | `store_damaged`; nothing changed |
 | 6. `expect_digest` given and different from the recomputed digest | `preview_stale {restore_digest}`; nothing changed |
 | 7. Insert the `before_rewind` point, pin `last_safety` | error returned with `safety_snapshot`; nothing changed |
 | 8. Commit the intent record (§9.7) | error; nothing changed |
-| 9. Stage | staging removed; journal an `incomplete` rewind entry with no changes and clear the intent in one transaction; `rewind_incomplete {safety_snapshot, tree_changed: false}` |
+| 9. Stage | staging removed; journal an `incomplete` rewind entry with `end_snapshot` equal to the safety snapshot (the tree is unchanged) and no changes, and clear the intent, in one transaction; `rewind_incomplete {safety_snapshot, tree_changed: false}` |
 | 10. Apply | keys that fail are collected; the apply continues |
 | 11. Snapshot after apply | the entry records no `end_snapshot` and no `changes`; `incomplete = true` |
 | 12. Journal the entry and clear the intent | retried once; if the append fails twice, a separate transaction sets `rewind_intent.completed_at_ms` and stores the entry's fields in `completion` (rule 2) |
@@ -1084,7 +1100,7 @@ Rules:
 1. The safety snapshot is taken before anything changes, and every rewind that wrote an intent record is journaled, complete or not (D-21).
 2. When the rewind call returns, its intent row is either deleted together with the appended entry or marked completed (step 12). A completed row is journaled from its recorded fields and deleted at the next open; it is never rolled back. If marking it also fails, the error is logged and the next open rolls back after taking a pre-rollback snapshot (§9.7), so the finished restore stays reachable as a point.
 3. Success requires an empty `failed` list. A rewind with failed keys returns `rewind_incomplete {safety_snapshot, tree_changed: true, failed (capped), failed_total}` and is journaled with `incomplete = true`. A partial success is not a success (§13.6).
-4. The rewind entry has `kind = rewind`, `start_snapshot = safety`, `end_snapshot = after apply`, `rewind_target`, `rewind_target_point`, `changes = diff(safety, after apply)`, and `turn_uid = request id` (also stored in `entries.request_id`) so a retried request can find it (§10.7).
+4. The rewind entry has `kind = rewind`, `start_snapshot = safety`, `end_snapshot = after apply`, `rewind_target`, `rewind_target_point`, `changes = diff(safety, after apply)`, and `turn_uid = request id` (also stored in `entries.request_id`) so a retried request can find it (§10.7). Before step 1, a rewind or raw restore looks up `entries.request_id`; a match is answered from the entry as §10.7 describes, and nothing runs again.
 5. A rewind runs on the project worker and is never cut short by a client disconnect or a daemon stop request (§11.5).
 
 ### 9.7 Intent record and recovery
@@ -1122,7 +1138,7 @@ stateDiagram-v2
 
 **Failed rollback.** If step 2, 4 or 5 fails, the intent row stays, a `recovery` row is written, and the project is in **recovery required**:
 
-- Recording continues: `begin_turn`, `before_command`, `after_command`, `end_turn` and `end_session` are served, and their answers carry the `recovery_required` notice, which the hook shows once per session (D-72). Snapshots do not change the tree, and points taken now are the user's protection while the project is in this state.
+- Recording continues: `begin_turn`, `before_command`, `after_command`, `end_turn` and `end_session` are served, and their `snapshot` answers carry the `recovery_required` notice (§10.11), which the hook shows once per session (D-72). Snapshots do not change the tree, and points taken now are the user's protection while the project is in this state.
 - Also allowed: `status`, `list_points`, `list_unprotected`, `verify`, `preview_snapshot`, `restore_snapshot`, `forget`.
 - Refused with `recovery_required {safety_snapshot}`: `rewind`, `preview` and `prune`.
 - A failed rollback is never retried automatically. Only `restore_snapshot` leaves recovery required.
@@ -1152,6 +1168,8 @@ Defaults: points older than 30 days are pruned, and the oldest points are pruned
 | `intent` | safety and target of a live intent or recovery row, and the pre-rollback point of §9.7 | until the row is deleted |
 | `preview` | a preview's current snapshot | 1 hour |
 
+A pin row is keyed by snapshot and reason, so holders that share a snapshot share the row. When a holder changes (a point is inserted, a turn closes, an intent or `recovery` row is written or deleted), the rows of the reasons it holds are recomputed from all their holders in the same transaction: `newest` from the newest point, `open_turn` from the points of open turns, `intent` from the live intent and `recovery` rows and the pre-rollback point. A row is never deleted by snapshot id alone. `last_safety` is replaced at each rewind and raw restore, and `preview` rows expire (D-90).
+
 A manifest with no point and no pin (an unused preview, a snapshot whose operation failed) is deleted once it is older than 1 hour by its file mtime.
 
 **Algorithm** (`prune {dry_run}`, run by the janitor daily and by `remora prune`):
@@ -1177,6 +1195,7 @@ The journal is never pruned (D-15).
 4. Before deleting, the `<home>` path MUST be absolute, the parent of the recorded `blobs` directory, its last component MUST equal `<id>-<data dir hash>` (§7.7), its `owner.json` MUST name this data directory and project, and its parent MUST be `<anchor>/.remora-store` or `<mount>\.remora-store-<SID>` as recorded in `project.json`. Deletion uses the no-follow walk and never follows a symlink out of the directory.
 5. A project whose root no longer exists is forgotten by its path; nothing is recreated.
 6. `forget` of a root with no project answers `forgotten {already: true}`, so a retried request succeeds.
+7. If the blob home's `owner.json` names another data directory (the data directory moved, or is reached through another canonical path, §6.1), rule 4 forbids deleting it: `forget` deletes `<data>/projects/<id>/` only, leaves the blob home in place, and returns its path in `forgotten.blob_home` so the user can delete it (OQ-43).
 
 ### 9.11 Failure isolation
 
@@ -1201,7 +1220,7 @@ Lock hierarchy, always taken in this order:
 2. The project lock, `projects.lock` and `install.lock` are acquired with a 10 second deadline; on expiry the operation fails with `busy`. With a single daemon per data directory the project lock only times out when a second daemon instance shares the data directory by mistake.
 3. Inside a long-lived process (the daemon, and the CLI for `install.lock`), a lock with a deadline is acquired with `try_lock`, retried with a delay of 5 ms doubling to 100 ms until the deadline (D-78). This is acquisition, not a liveness probe. The blocking acquisition on a helper thread (§11.3) is used only by short-lived processes that exit when the limit passes: `daemon`, `init`, `uninit` and `service`.
 4. No code tests whether a lock is free by taking it and releasing it (D-32). Liveness comes from `identify` (§10.5).
-5. A process that acquires `daemon.lock` to observe a stop MUST release it immediately. A process MUST NOT hold `starter.lock` or `daemon.lock` while calling `ensure` or waiting for a daemon it started, because the daemon it starts blocks on the same locks. `init`, `uninit` and `service install` hold `starter.lock` only while stopping the daemon and writing the definition, and release it before `systemctl restart`, `launchctl bootstrap` or `ensure`.
+5. A process that acquires `daemon.lock` to observe a stop MUST release it immediately. A process MUST NOT hold `starter.lock` or `daemon.lock` while calling `ensure` or waiting for a daemon it started, because the daemon it starts blocks on the same locks. A process that needs `install.lock` and `starter.lock` either takes them in the order of the table above or releases `install.lock` before taking `starter.lock` (`uninit` does the latter, §13.4). `init`, `uninit` and `service install` hold `starter.lock` only while stopping the daemon and writing the definition, and release it before `systemctl restart`, `launchctl bootstrap` or `ensure`.
 6. Readers do not take locks: all reads happen inside the daemon, on the worker or through SQLite's WAL readers.
 
 ### 9.13 Status
@@ -1212,13 +1231,18 @@ Lock hierarchy, always taken in this order:
 |---|---|
 | `root`, `project_id` | |
 | `state` | `ok`, `recovery_required`, `blob_store_unavailable`, `open_failed` |
-| `open_sessions` | up to 20: session id, agent, started, last event, last command (cut), implicit |
+| `open_sessions` | up to 20 open-session items `{session, agent, started_at_ms, last_event_ms, last_command, implicit, transcript_mtime_ms?}`; `last_command` cut to 512 bytes; `transcript_mtime_ms` only when `transcript_path` is known and the file can be read. `turn_in_progress` uses the same items (§9.6) |
 | `open_sessions_total` | |
 | `points_total`, `points_pruned` | |
-| `journal` | `entries`, head state (`matches`, `recreated`, `conflict`) |
-| `last_snapshot` | time, `copy_on_write` or `plain_copy`, counters |
+| `journal` | `entries`, head state (`matches`, `recreated`, `conflict`), `head_conflict` (null, or the reason and old head recorded in `meta.head_conflict`), `head_recreated_at_ms` (null or the time, §8.6) |
+| `keys_log` | `{recreated, invalid_lines}` for `machine.keys.log` (§8.5 rule 7); `recreated` stays true until the daemon restarts |
+| `last_snapshot` | time, `copy_on_write` or `plain_copy`, counters; kept in the project worker's memory, so null after a daemon restart until the next point |
 | `unprotected_total` and `unprotected` | first 20 paths of the last snapshot, cut to 512 bytes each; the full list is paged by `list_unprotected` |
+| `other_filesystems` | the entries of `unprotected` recorded as `opaque {other_filesystem}` (§5.5 rule 4) |
 | `blob_home`, `blob_home_reason`, `plain_copies_because` | |
+| `anchor_refused_by` | null, or for `no_safe_anchor` the folder that ruled out a Unix anchor (§7.7.1 rule 4), found by running the anchor search again at project open; null when that search now finds an anchor, in which case the recorded store is kept (§7.7: never switched silently) |
+| `foreign_owner_data_dir` | null, or for `blob_store_unavailable {reason: "foreign_owner"}` the data directory recorded in the blob home's `owner.json`, with the hint `remora forget` (§6.1) |
+| `damaged` | `{open_turns_closed, manifests_unreadable, points_without_manifest}` found since the project opened (§9.11) |
 | `store_bytes`, `retention` | effective values |
 | `config_problem` | null or the parse error with line and column |
 | `recovery` | null or `{safety_snapshot, failed_at_ms, error}` |
@@ -1244,7 +1268,7 @@ The endpoint is derived only from the canonical data directory, never from envir
 
 | OS | Endpoint | Protection |
 |---|---|---|
-| Linux, macOS | `<data>/daemon.sock` if the path is at most 100 bytes | socket created inside the owner-only `<data>`; the socket file is `0o600` (the daemon binds with umask `0o177`) |
+| Linux, macOS | `<data>/daemon.sock` if the path is at most 100 bytes | socket created inside the owner-only `<data>`; the socket file is `0o600` (the daemon binds with umask `0o177`, set through the scoped helper of §5.1 rule 5) |
 | Linux, macOS, long path (D-61) | `/tmp/remora-<uid>/<first 16 hex of SHA-256(canonical data dir)>.sock` | `/tmp/remora-<uid>` created `0o700` by the daemon; daemon and client both refuse it unless it is a real directory owned by `<uid>` with no group or other access (`unsafe_socket_dir`) |
 | Windows | `\\.\pipe\remora-<first 16 hex of SHA-256(canonical data dir)>` | created with `FILE_FLAG_FIRST_PIPE_INSTANCE` and a protected DACL granting the user SID and SYSTEM only; a name already taken makes the daemon fail with `endpoint_in_use` |
 
@@ -1320,7 +1344,7 @@ Every project request carries `root`, an absolute path. The daemon canonicalizes
 1. The client generates `id`: 16 random bytes as 32 lowercase hex characters, one per logical request (D-28). A retry of the same logical request MUST reuse the id.
 2. The daemon keeps a dedup window (D-63) of the 4,096 most recent mutating request ids, each for at most 15 minutes, with their encoded answers (at most 32 MiB of answers in total; the oldest entries are evicted first).
 3. A request whose id is in the window and completed gets the stored answer without running again. A request whose id is in progress waits for that run and gets its answer. A request whose id is in the window with a different `req.type` or `root` gets `invalid_request {field: "id"}`.
-4. Read-only requests are not stored; a retry runs them again.
+4. Read requests (`list_points`, `preview`, `preview_snapshot`, `status`, `list_unprotected`, `verify`, `daemon_info`) are not stored; a retry runs them again. `verify` counts as a read request: the `damaged` marks it sets and the blobs a store scrub quarantines are the same on every run.
 5. The window lives in memory and is lost when the daemon stops. Requests that a retry may reach on a new daemon are idempotent through persisted state (§9):
 
 | Request | Idempotent across daemon restarts because |
@@ -1330,9 +1354,11 @@ Every project request carries `root`, an absolute path. The daemon canonicalizes
 | `before_command` without `tool_use_id` | not idempotent across restarts; a retry may record a second checkpoint (harmless: an extra point) |
 | `after_command` with `tool_use_id` | an ended command is not changed again |
 | `end_turn`, `end_session` | no open turn means no-op |
-| `rewind`, `restore_snapshot` | the journal entry stores the request id as `turn_uid`, and `entries.request_id` indexes it; a retry finds it and answers `rewound` with `replayed: true` and the counts recorded in the entry |
+| `rewind`, `restore_snapshot` | the journal entry stores the request id as `turn_uid`, and `entries.request_id` indexes it; a retry finds it before running and is answered from the entry with `replayed: true` (rule 6) |
 | `forget` | `forgotten {already: true}` |
 | `prune` | applying retention twice gives the same result |
+
+6. A replayed answer is built from the entry alone. An entry without `incomplete` answers `rewound` with `restored` = changes of kind added, `deleted` = removed, `reverted` = modified, type changed and mode changed (counted from the stored `changes` list, which holds at most 100,000 items), the `safety_snapshot` from `start_snapshot`, and empty `skipped`, `failed` and `unrestorable` lists with totals 0. An entry with `incomplete` answers `rewind_incomplete {safety_snapshot, tree_changed, failed: [], failed_total: 0, replayed: true}`, with `tree_changed` false only when `end_snapshot` equals `start_snapshot` (a stage failure, §9.6 step 9).
 
 ### 10.8 Paging and caps
 
@@ -1345,7 +1371,7 @@ Every list in an answer is either paged by an opaque cursor or capped with a tot
 | `list_points` | 50 | 100 | newest first |
 | `list_unprotected` | 100 | 1,000 | key order |
 
-`cursor` is an opaque string of at most 256 bytes produced by the daemon (`next_cursor`, `null` on the last page). It encodes the position after the last item (for points: `at_ms` and `point_id`), so points added during paging never shift a page (D-64). A cursor the daemon cannot decode is `invalid_request {field: "cursor"}`. Offsets are not used.
+`cursor` is an opaque string of at most 256 bytes produced by the daemon (`next_cursor`, `null` on the last page). It encodes the position after the last item (for points: `at_ms` and `point_id`), so points added during paging never shift a page (D-64). For `list_unprotected`, whose keys can be 4,096 bytes, it encodes the snapshot id of `unprotected_meta` and the index of the last row returned in key order; those rows change only as a whole when a newer point completes (§7.1), and a cursor whose snapshot no longer matches is `invalid_request {field: "cursor"}`, after which the client lists again from the start. A cursor the daemon cannot decode is `invalid_request {field: "cursor"}`. Offsets are not used.
 
 **Capped fields:**
 
@@ -1383,7 +1409,7 @@ Every connection step has a deadline (D-31):
 | Waiting for the next request | daemon | 30 s idle, then close |
 | Reading the rest of a started message | daemon | 5 s |
 | Writing an answer | daemon | 10 s, then close (the result stays in the dedup window) |
-| Reading an answer | client | caller's deadline (hook: budget; CLI: 120 s, `rewind` and `restore_snapshot`: none, the CLI shows a waiting message after 2 s) |
+| Reading an answer | client | caller's deadline (hook: budget; CLI: 120 s; `rewind`, `restore_snapshot` and `verify` with `store: true`: none, the CLI shows a waiting message after 2 s) |
 
 On Unix, read and write timeouts use the socket's `SO_RCVTIMEO` and `SO_SNDTIMEO`, and connect uses a non-blocking connect with `poll`. On Windows, every operation is overlapped and cancelled at its deadline. A client that stops reading costs the daemon one connection thread for at most 10 seconds.
 
@@ -1406,16 +1432,16 @@ On Unix, read and write timeouts use the socket's `SO_RCVTIMEO` and `SO_SNDTIMEO
 | `restore_snapshot {root, snapshot, expect_digest?, force}` | `rewound` | yes | yes (§10.7) | no, capped | yes |
 | `status {root}` | `status` | no | yes (read-only) | no, capped | yes |
 | `list_unprotected {root, cursor?, limit?}` | `unprotected {paths, next_cursor, total}` | no | yes (read-only) | yes | yes |
-| `verify {root, store}` | `verified {journal, store?}` | yes (sets `points.damaged`, a store scrub may quarantine) | yes (a retry runs it again with the same result) | no, capped | yes |
+| `verify {root, store}` | `verified {journal, store?}` | no (a read request; its daemon-side marking of `points.damaged` and a store scrub's quarantine are idempotent) | yes (read-only; a retry runs it again) | no, capped | yes |
 | `prune {root, dry_run}` | `pruned {report}` | yes | yes (§10.7) | no | no |
-| `forget {root, force}` | `forgotten {already, blob_home?}` | yes | yes (§10.7) | no | yes |
+| `forget {root, force}` | `forgotten {already, blob_home?}` (`blob_home`: a blob home left in place, §9.10 rule 7) | yes | yes (§10.7) | no | yes |
 | `daemon_info {}` | `daemon {version, protocols, started_at_ms, projects_open, config_problem, log_path, log_write_failures}` (shown by `status`, §13.5) | no | yes (read-only) | no | n/a |
 
 Read requests (`list_points`, `preview`, `preview_snapshot`, `status`, `list_unprotected`, `verify`) MUST NOT create a project: for an unrecorded root they answer `unknown_project`, except `status` and `list_points`, which answer with `recorded: false` and an empty list.
 
 `after_command`, `end_turn`, `end_session` and `prune` for an unrecorded root answer `unknown_project`; only `begin_turn` and `before_command` create a project.
 
-Answers to the five recording requests may carry `notice`. `notice` values: `rewind_rolled_back`, `recovery_required`, `config_problem`. The hook turns a notice into a once-per-session message (§12.8).
+`snapshot` answers (to `begin_turn` and `before_command`) may carry `notice`; no other answer does. `notice` values: `rewind_rolled_back`, `recovery_required`, `config_problem`. When several apply, the answer carries the first of them in that order. `rewind_rolled_back` is carried until each session of the project has received it once (§9.7 step 6); `recovery_required` and `config_problem` are carried on every `snapshot` answer while the condition holds. The hook turns a notice into a once-per-session message (§12.8).
 
 ### 10.12 Error kinds
 
@@ -1433,19 +1459,19 @@ Answers to the five recording requests may carry `notice`. `notice` values: `rew
 | `unknown_point` | | point id unknown or snapshot differs | 1 | n/a |
 | `unknown_snapshot` | | no valid manifest with that id | 1 | n/a |
 | `pruned` | `pruned_at_ms` | the point's snapshot was pruned | 3 | n/a |
-| `turn_in_progress` | `sessions`, `sessions_total` | open turns and no `force` | 3 | n/a |
+| `turn_in_progress` | `sessions` (open-session items of §9.13), `sessions_total` | open turns and no `force` | 3 | n/a |
 | `preview_stale` | `restore_digest` | what the rewind would change differs from the preview | 3 | n/a |
 | `recovery_required` | `safety_snapshot` | a rollback failed; `rewind`, `preview` and `prune` refused (§9.7) | 3 | n/a (recording continues; the notice warns) |
 | `root_overlaps_data_dir` | | root contains or is inside `<data>` | 3 | warn `not_recorded` |
 | `root_not_directory` | | root exists and is not a directory | 3 | warn `not_recorded` |
 | `project_mismatch` | `recorded_root` | `project.json` names another root | 1 | warn `not_recorded` |
 | `snapshot_failed` | `cause` | store-side failure | 1 | warn `snapshot_failed` |
-| `blob_store_unavailable` | `path` | recorded blob home missing or unsafe | 1 | warn `store_unavailable` |
+| `blob_store_unavailable` | `path`, `reason` (`missing`, `foreign_owner`, `check_failed`) | recorded blob home missing, owned by another data directory, or unsafe (§7.7) | 1 | warn `store_unavailable` |
 | `store_damaged` | `missing_total`, `corrupt_total`, `first` (up to 20 keys) | manifest invalid or blobs missing or corrupt | 1 | n/a |
 | `rewind_incomplete` | `safety_snapshot`, `tree_changed`, `failed`, `failed_total` | rewind did not finish cleanly | 1 | n/a |
 | `format_too_new` | `what`, `found`, `supported` | data written by a newer version | 1 | warn `format_too_new` |
 | `foreign_database` | `path` | not a Remora journal | 1 | warn `snapshot_failed` |
-| `unsafe_data_dir` | `path` | `<data>` owned by another user | 4 | warn `not_recorded` |
+| `unsafe_data_dir` | `path`, `reason` (`foreign_owner`, `not_directory`, `network`) | `<data>` owned by another user, not a real directory, or on a network filesystem (§5.2, §6.1) | 4 | warn `not_recorded` |
 | `corrupt_state` | `path` | a state file fails validation | 1 | warn `snapshot_failed` |
 | `unsupported_filesystem` | `path` | no atomic no-replace rename (§5.4) | 1 | warn `snapshot_failed` |
 | `invalid_key` | `path` | `machine.key` is not exactly 32 bytes | 1 | warn `daemon_start_failed` |
@@ -1453,7 +1479,22 @@ Answers to the five recording requests may carry `notice`. `notice` values: `rew
 | `endpoint_in_use` | `endpoint` | the pipe or socket name is held by another process | 1 | warn `daemon_start_failed` |
 | `internal` | | a bug or an unexpected OS error (logged with details) | 1 | warn `snapshot_failed` |
 
-Client-side conditions that never travel on the wire, with their CLI exit code: `daemon_not_running` (4), `daemon_start_failed {kind}` (4, §11.11), `daemon_too_old` (4), `impostor {endpoint}` (4), `unsafe_socket_dir {path}` (4), `no_user_session` (1, `service install` on Linux), `timeout` (1 for the CLI; the hook warns `daemon_unreachable` or `slow_snapshot`, §12.8), `disconnected` (retried once with the same id).
+In the hook column, `n/a` means the hook never sends a request that can produce the kind; if one arrives anyway, the hook logs it and prints nothing. A CLI command that gets `shutting_down` runs `ensure` and resends with the same id until its 10 s `ensure` deadline (§10.10) passes, then exits 4 as `daemon_not_running`. A `version_mismatch` answer to a request is handled like the `ensure` result: `ensure`, then one resend; a second `version_mismatch` exits 4.
+
+Client-side conditions never travel on the wire:
+
+| Condition | Detail fields | CLI exit | Hook reaction |
+|---|---|---|---|
+| `daemon_not_running` | | 4 | warn `daemon_unreachable` |
+| `daemon_start_failed` | `kind` | 4 (§11.11) | warn `daemon_start_failed` |
+| `daemon_too_old` | | 4 | warn `daemon_too_old` |
+| `impostor` | `endpoint` | 4 | warn `impostor` |
+| `unsafe_socket_dir` | `path` | 4 | warn `unsafe_socket_dir` |
+| `timeout` | | 1 | warn `daemon_unreachable`, or `slow_snapshot` when the request was written (§12.8) |
+| `disconnected` | | `ensure` and one resend with the same id; a second `disconnected` exits 1 | `ensure` and one resend with the same id if time remains, then warn `daemon_unreachable` |
+| `no_user_session` | | 1 (`service install` on Linux) | n/a |
+| `usage` | `field?` | 2: invalid arguments, no root (§13.1) | n/a |
+| `confirmation_required` | | 2: `rewind` or `forget` without a terminal and without `--yes` (§13.6, §13.8) | n/a |
 
 Per-key failure codes, used in the `failed` lists of `rewound` and `rewind_incomplete`:
 
@@ -1463,8 +1504,8 @@ Per-key failure codes, used in the `failed` lists of `rewound` and `rewind_incom
 | `in_use` | Windows sharing violation on rename or delete (§5.9) |
 | `changed_during_rewind` | the entry changed after the compute scan (§7.6) |
 | `permission_denied` | the OS refused the operation |
-| `reserved_name` | a Windows reserved device name |
-| `case_collision` | two keys equal under the volume's case folding (§7.3) |
+| `reserved_name` | the OS refused a create because it treats the name as a device name, or the key matches the list of §7.3 rule 2 (§7.6 apply rule 7) |
+| `case_collision` | a key to create equals, under the volume's case folding, a current entry that restore leaves in place (§7.6 apply rule 7) |
 | `io_error` | any other OS error, with its OS code in the detail |
 
 ### 10.13 Examples
@@ -1481,7 +1522,7 @@ These examples are part of the golden wire suite (§17.4). Hex values are shorte
 → {"v":1,"id":"5d0f...","req":{"type":"before_command","root":"/home/me/app","session":"4f1c2a","agent":"claude-code","command":"rm -rf build","tool_use_id":"toolu_01","wait_ms":22000}}
 ← {"v":1,"id":"5d0f...","ok":{"type":"snapshot","point_id":118,"snapshot":"9ad3...","late":false}}
 → {"v":1,"id":"6e21...","req":{"type":"rewind","root":"/home/me/app","point_id":118,"expect_snapshot":"9ad3...","expect_digest":"02be...","force":false}}
-← {"v":1,"id":"6e21...","err":{"kind":"turn_in_progress","message":"a turn is open in session 4f1c2a","sessions":[{"session":"4f1c2a","started_at_ms":1791810000000,"last_event_ms":1791810042000,"last_command":"rm -rf build"}],"sessions_total":1}}
+← {"v":1,"id":"6e21...","err":{"kind":"turn_in_progress","message":"a turn is open in session 4f1c2a","sessions":[{"session":"4f1c2a","agent":"claude-code","started_at_ms":1791810000000,"last_event_ms":1791810042000,"last_command":"rm -rf build","implicit":false}],"sessions_total":1}}
 → {"v":2,"id":"7a90...","req":{"type":"status","root":"/home/me/app"}}
 ← {"v":0,"op":"error","kind":"version_mismatch","message":"protocol 2 is not served","id":"7a90...","supported":[1]}
 ```
@@ -1494,7 +1535,7 @@ These examples are part of the golden wire suite (§17.4). Hex values are shorte
 
 `remora daemon [--replace]` starts all-or-nothing:
 
-1. Install signal handlers first: `SIGTERM` and `SIGINT` (Unix) request a stop (§11.5); `SIGHUP` is ignored. On Windows the daemon has no console; it stops on the `stop` verb or when the session ends.
+1. Install signal handlers first: `SIGTERM` and `SIGINT` (Unix) request a stop (§11.5); `SIGHUP` is ignored. On Windows the daemon has no console, so it receives no console control events; it stops on the `stop` verb, and at the end of the user's session through a hidden top-level window on its own thread, whose `WM_QUERYENDSESSION` and `WM_ENDSESSION` handlers request a stop (D-88) [verify]. Windows may end the process before running requests finish; recovery (§9.7) covers a rewind cut that way.
 2. Take the starter lock (§11.3).
 3. Identify any running daemon and decide (§11.3).
 4. Take the instance lock (§11.2).
@@ -1533,7 +1574,7 @@ A blocking lock acquisition with a limit runs on a helper thread; when the limit
 
 ### 11.4 Version rule and ensure
 
-A hook or CLI command needs a daemon whose version is greater than or equal to its own (D-33). Versions are compared with the `semver` crate: build metadata is ignored and a prerelease orders before its release, so a `1.3.0-rc.1` daemon is replaced by a `1.3.0` client. A daemon newer than the client is never replaced.
+A hook or CLI command needs a daemon whose version is greater than or equal to its own (D-33). Versions are compared by SemVer precedence with the `semver` crate (`Version::cmp_precedence`; the derived `Ord` also compares build metadata and is not used): build metadata is ignored and a prerelease orders before its release, so a `1.3.0-rc.1` daemon is replaced by a `1.3.0` client. A daemon newer than the client is never replaced.
 
 `remora_daemon::ensure(data_dir, deadline)` is the single routine every client role uses (`init`, `service install`, the hook, and the CLI commands listed in §13.2). The CLI's deadline is 10 seconds.
 
@@ -1609,13 +1650,13 @@ Every installer step checks its result, waits for asynchronous managers to finis
 
 | OS | Definition | Install steps | Restart on crash |
 |---|---|---|---|
-| Linux | `~/.config/systemd/user/remora.service`: `Type=simple`, `ExecStart="<exe>" daemon --replace`, `Restart=on-failure`, `RestartSec=2`, `WantedBy=default.target` | `systemctl --user show-environment` (fails: `no_user_session`, with a hint that hooks still start the daemon), write the unit, `daemon-reload`, `enable`, `restart` | yes, by systemd |
+| Linux | `$XDG_CONFIG_HOME/systemd/user/remora.service` when `XDG_CONFIG_HOME` is set and absolute, else `~/.config/systemd/user/remora.service`: `Type=simple`, `ExecStart="<exe>" daemon --replace`, `Restart=on-failure`, `RestartSec=2`, `WantedBy=default.target` | `systemctl --user show-environment` (fails: `no_user_session`, with a hint that hooks still start the daemon), write the unit, `daemon-reload`, `enable`, `restart` | yes, by systemd |
 | macOS | `~/Library/LaunchAgents/dev.wolfware.remora.plist`: `ProgramArguments = [<exe>, daemon, --replace]`, `RunAtLoad`, `KeepAlive = {SuccessfulExit = false}`, `ProcessType = Background` | `launchctl bootout gui/<uid>/dev.wolfware.remora` (not loaded is fine), wait until `launchctl print` reports it absent (10 s limit), write the plist, `launchctl bootstrap gui/<uid> <plist>` | yes, by launchd |
 | Windows | `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`, value `Remora` = `"<exe>" daemon --replace --detach` | write the value with `RegSetValueExW`, stop any running daemon (as `uninit` does, §13.4), release the locks, `ensure` | no: the next hook or CLI command starts it (§11.4) |
 
 1. A non-default data directory adds `--data-dir "<D>"` to each definition.
 2. `<uid>` comes from `getuid()` (`rustix`), not from a command.
-3. Uninstall removes the definition and stops the daemon. A missing definition is success. On Windows, `RegDeleteKeyValueW` returning not-found is success; any other error is reported.
+3. Uninstall removes the definition and stops the daemon. Linux: `systemctl --user disable remora.service`, remove the unit, `daemon-reload`. macOS: `launchctl bootout gui/<uid>/dev.wolfware.remora` (not loaded is fine), wait until `launchctl print` reports it absent (10 s limit), remove the plist. Windows: `RegDeleteKeyValueW`. Then, on every OS, any running daemon is stopped as `uninit` stops it (§13.4 rule 3), which also covers a daemon running outside the service manager. A missing definition is success; on Windows, `RegDeleteKeyValueW` returning not-found is success, and any other error is reported.
 4. `service status` reports, per OS: definition present, its recorded command, whether it matches `install.json`, and the manager's state (`systemctl --user is-active`, `launchctl print`). A definition that exists but cannot be read is reported with its error, never as "not installed" (only not-found means absent).
 5. Windows uses a per-user Run entry because a per-user Windows service needs administrator rights to install (D-35). `remora.exe` is a console program (it is the CLI), so a process started from the Run entry gets a console window; `--detach` re-launches the daemon without one and exits, leaving at most a brief console flash at logon [verify]. The Task Scheduler alternative is in §21.
 6. After a hook or the CLI replaces a daemon, the daemon started by systemd or launchd has exited 0 and the new one runs outside the service manager, without crash restart until the next login or `service install`. `service status` reports this as `running outside the service manager`.
@@ -1646,7 +1687,7 @@ The janitor never creates a project or a directory (§9.1 rule 5).
 
 `remora_fs::process::spawn_detached(exe, args, cwd)` starts a process that outlives its parent and holds none of the parent's handles (D-07):
 
-- **Unix:** `fork` and `exec` through `std::process::Command` with stdin, stdout and stderr on the null device, `setsid()` in the child before exec (through `sys`), and every descriptor above 2 closed in the child (`close_range(3, ~0)` on Linux 5.9+, otherwise a loop up to `RLIMIT_NOFILE` capped at 65,536). The parent does not wait for the child. When the short-lived parent (a hook or a CLI command) exits, the child is reparented to `init` (or the nearest subreaper), which reaps it.
+- **Unix:** `fork` and `exec` through `std::process::Command` with stdin, stdout and stderr on the null device, `setsid()` in the child before exec (through `sys`), and every descriptor above 2 marked close-on-exec in the child (`close_range(3, ~0, CLOSE_RANGE_CLOEXEC)` on Linux 5.11 and later, otherwise `fcntl(F_SETFD, FD_CLOEXEC)` in a loop up to `RLIMIT_NOFILE` capped at 65,536), so they are closed at `exec` while the pipe `std::process::Command` uses to report an `exec` failure keeps working. The parent does not wait for the child. When the short-lived parent (a hook or a CLI command) exits, the child is reparented to `init` (or the nearest subreaper), which reaps it.
 - **Windows:** `CreateProcessW` with `bInheritHandles = FALSE`, `DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_BREAKAWAY_FROM_JOB` (`CREATE_NO_WINDOW` is ignored together with `DETACHED_PROCESS`, so it is not passed), standard handles unset. If `CREATE_BREAKAWAY_FROM_JOB` is refused (`ERROR_ACCESS_DENIED`), retry without it; if the host's job object then has `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`, the daemon ends with the host [verify], and the next hook starts it again. The command line is built with the Windows quoting rules of `remora_types::cmdline` (no shell, no PowerShell).
 - Arguments are passed as `OsStr` without lossy conversion.
 
@@ -1698,15 +1739,15 @@ margin_ms = host_timeout_ms - budget_ms
 
 The formula is D-62.
 
-| Event (matcher) | Host timeout | Budget | Margin | Request | Snapshots | Autostarts daemon | Exit 2 would block |
-|---|---|---|---|---|---|---|---|
-| `UserPromptSubmit` | 30 s | 22.5 s | 7.5 s | `begin_turn` | yes, before the turn | yes | yes |
-| `PreToolUse` (`Bash`) | 30 s | 22.5 s | 7.5 s | `before_command` | yes, before the command | yes | yes |
-| `PostToolUse` (`Bash`) | 10 s | 7.5 s | 2.5 s | `after_command` (exit 0) | no | yes | no |
-| `PostToolUseFailure` (`Bash`) | 10 s | 7.5 s | 2.5 s | `after_command` (parsed exit code, or none on interrupt) | no | yes | no |
-| `Stop` | 10 s | 7.5 s | 2.5 s | `end_turn` | yes, at the end (daemon side) | yes | yes |
-| `StopFailure` | 10 s | 7.5 s | 2.5 s | `end_turn` | yes, at the end (daemon side) | yes | no |
-| `SessionEnd` | 5 s | 3.75 s | 1.25 s | `end_session` | yes, at the end (daemon side) | no | no |
+| Event (matcher) | Host timeout | Budget | Margin | Request | Snapshots | Autostarts daemon | Exit 2 would block | Output shown (H7, H11) |
+|---|---|---|---|---|---|---|---|---|
+| `UserPromptSubmit` | 30 s | 22.5 s | 7.5 s | `begin_turn` | yes, before the turn | yes | yes | yes |
+| `PreToolUse` (`Bash`) | 30 s | 22.5 s | 7.5 s | `before_command` | yes, before the command | yes | yes | yes |
+| `PostToolUse` (`Bash`) | 10 s | 7.5 s | 2.5 s | `after_command` (exit 0) | no | yes | no | yes |
+| `PostToolUseFailure` (`Bash`) | 10 s | 7.5 s | 2.5 s | `after_command` (parsed exit code, or none on interrupt) | no | yes | no | yes |
+| `Stop` | 10 s | 7.5 s | 2.5 s | `end_turn` | yes, at the end (daemon side) | yes | yes | yes |
+| `StopFailure` | 10 s | 7.5 s | 2.5 s | `end_turn` | yes, at the end (daemon side) | yes | no | no |
+| `SessionEnd` | 5 s | 3.75 s | 1.25 s | `end_session` | yes, at the end (daemon side) | no | no | no |
 
 Rules:
 
@@ -1758,8 +1799,8 @@ sequenceDiagram
 |---|---|
 | `UserPromptSubmit` | `prompt` (cut to 4 KiB), `transcript_path`, `session_id` |
 | `PreToolUse` with `tool_name == "Bash"` | `tool_input.command` (cut to 16 KiB), `tool_use_id`, `agent_type` |
-| `PostToolUse` with `tool_name == "Bash"` | `tool_use_id`, `exit_code = 0` |
-| `PostToolUseFailure` with `tool_name == "Bash"` | `tool_use_id`, `exit_code` parsed from `error` matching `^Exit code (-?\d+)`; none when `is_interrupt` is true or nothing matches |
+| `PostToolUse` with `tool_name == "Bash"` | `tool_input.command` (cut to 16 KiB), `tool_use_id`, `exit_code = 0` |
+| `PostToolUseFailure` with `tool_name == "Bash"` | `tool_input.command` (cut to 16 KiB), `tool_use_id`, `exit_code` parsed from `error` matching `^Exit code (-?\d+)`; none when `is_interrupt` is true or nothing matches |
 | `Stop`, `StopFailure` | `session_id` |
 | `SessionEnd` | `session_id`, `reason` |
 
@@ -1798,7 +1839,7 @@ Hooks are user-wide (D-39). The root of a session is decided at its first event 
 3. Otherwise canonicalize `cwd` (deepest existing ancestor, §5.6) and walk up to the nearest directory containing `.git` (a directory, or a file for worktrees and submodules). None: `-`.
 4. A candidate root that is the filesystem root, the user's home directory, a volume root, or overlaps `<data>`, is not recorded (`-`), and the hook warns once with reason `not_recorded` (D-66).
 5. A `.remora-ignore` that opts out (§7.8) gives `-` silently. An invalid one gives `-` and the warning `ignore_file_invalid`.
-6. The marker is created with `create_exclusive_atomic`. If another hook of the same session created it first, its content is used. Every later event of the session sets the marker's mtime to now, so the janitor expires markers by last use (§11.8).
+6. The marker is created with `create_exclusive_atomic`. If another hook of the same session created it first, its content is used. Every later event of the session sets the marker's mtime to now without following a link (§5.5 rule 7), so the janitor expires markers by last use (§11.8).
 7. A non-UTF-8 root gives `-` and the warning `not_recorded`.
 
 ### 12.7 Payload limits
@@ -1815,7 +1856,7 @@ Hooks are user-wide (D-39). The root of a session is decided at its first event 
 ### 12.8 Warnings and notices
 
 1. The hook prints at most one `systemMessage` per session per reason (D-38). The marker `<data>/hook/warnings/<session>.<reason>` is created with exclusive creation; if it exists, nothing is printed.
-2. A marker is created only on events whose output the host shows (H11). On `SessionEnd` and `StopFailure`, failures are logged and the marker is not consumed, so the warning still reaches the user later in the session if the problem persists.
+2. A marker is created only on events whose output the host shows (the last column of §12.2, from H7 and H11). On `SessionEnd` and `StopFailure`, failures are logged and the marker is not consumed, so the warning still reaches the user later in the session if the problem persists.
 3. Reasons and texts:
 
 | Reason | Text after `Remora: ` |
@@ -1834,9 +1875,9 @@ Hooks are user-wide (D-39). The root of a session is decided at its first event 
 | `format_too_new` | `not recording: data was written by a newer Remora. Upgrade remora.` |
 | `late` | `a restore point finished after the command started; it may include the command's effects.` (only when an answer with `late: true` arrives within the budget; a point that becomes late after the hook stopped waiting is reported by `slow_snapshot` and shown as late in `log`) |
 | `rewind_rolled_back` | `an interrupted rewind was rolled back.` |
-| `config_problem` | `config.toml is invalid, defaults are in use: <error>.` |
+| `config_problem` | `config.toml is invalid, defaults are in use. Run 'remora status'.` (`status` shows the error with its line and column) |
 
-Notices (`rewind_rolled_back`, `config_problem`) arrive in the `notice` field of a snapshot answer (§10.11) and use the same markers.
+Notices (`rewind_rolled_back`, `recovery_required`, `config_problem`) arrive in the `notice` field of a `snapshot` answer (§10.11) and use the same markers.
 
 ---
 
@@ -1861,7 +1902,7 @@ Root selection: `--root` that is inside a git repository maps to the repository 
 | `uninit` | | removes Remora's hooks and the service, stops the daemon; keeps all recorded data (D-60) |
 | `status` | `--root` | daemon, install, hooks, service and project state (§13.5); never starts a daemon |
 | `log` | `--root`, `-n/--count <N>` (default 20), `--all` | numbered restore points, newest `#1`; `--all` pages through every point |
-| `rewind <POINT>` | `--root`, `--snapshot <ID>`, `-y/--yes`, `--force` | preview, confirm, rewind (§13.6); `<POINT>` is `#N` or `N`; `--snapshot` restores a raw snapshot id instead |
+| `rewind <POINT>` | `--root`, `--snapshot <ID>`, `-y/--yes`, `--force` | preview, confirm, rewind (§13.6); `<POINT>` is `N`, the number `log` prints as `#N` (`#N` is accepted too, but `#` starts a comment in POSIX shells and PowerShell, so it must be quoted, as in `'#3'`); `--snapshot` restores a raw snapshot id instead |
 | `forget` | `--root`, `-y/--yes`, `--force` | removes all recorded data of the project after confirmation (§9.10) |
 | `prune` | `--root`, `--dry-run` | applies retention now (§9.9) and prints what was or would be removed |
 | `verify` | `--root`, `--store` | verifies the journal (§8.8); `--store` also scrubs the store (§7.10) |
@@ -1887,7 +1928,7 @@ Every command except `status`, `service status`, `uninit`, `service uninstall`, 
 
 1. `init` steps, each printed as `ok`, `failed: <reason>` or `skipped: <reason>`: stable path (§11.6), `install.json`, hooks, service (unless `--no-service`), `ensure`, self-check.
 2. `init` is idempotent. It always replaces a running daemon older than itself (through `ensure`), with or without a service.
-3. `uninit` first removes the hooks and the service definition, so no hook that starts afterwards spawns a daemon. It then takes the starter lock and stops the daemon (`identify`, `stop`, then acquires the instance lock with a blocking call on a helper thread with a 30 second limit and releases it at once), releases both locks, and sets `install.json` `service` to false. It never deletes recorded data; the printed summary names the data directory and `remora forget`.
+3. `uninit` first removes the hooks and the service definition under `install.lock`, so no hook that starts afterwards spawns a daemon, and releases `install.lock`. It then takes the starter lock, keeping the lock order of §9.12, and stops the daemon (`identify`, `stop`, then acquires the instance lock with a blocking call on a helper thread with a 30 second limit and releases it at once), releases both locks, and sets `install.json` `service` to false. It never deletes recorded data; the printed summary names the data directory and `remora forget`.
 4. Hints depend on the install mode: a user who ran `init --no-service` is never told to run `service install`.
 
 ### 13.5 Status
@@ -1901,7 +1942,7 @@ Every command except `status`, `service status`, `uninit`, `service uninstall`, 
 5. `config`: `ok` or the `config_problem`.
 6. `project`: the fields of §9.13, if the current directory or `--root` resolves to a root.
 
-With no daemon running, `status` prints sections 2 to 5 and exits 4. Output goes to stdout only.
+With no daemon running, `status` prints section 1 as `not running` (with the last start failure from `daemon.failed`, if any), then sections 2 to 5, leaves out section 6, and exits 4. Output goes to stdout only.
 
 ### 13.6 Log and rewind
 
@@ -1915,7 +1956,7 @@ With no daemon running, `status` prints sections 2 to 5 and exits 4. Output goes
 
 A late point shows `(late)` after its kind. A rolled-back safety point shows its label `rewind interrupted, rolled back`. Times are relative; `--json` carries exact milliseconds.
 
-`rewind #N` runs, in order:
+`rewind N` runs, in order:
 
 1. **Resolve:** list points to find `#N` (the `point_id` and snapshot id). Unknown: exit 1.
 2. **Refuse before asking:** `status` for open turns and recovery. Open turns without `--force`: print the open sessions (age, last event, last command) and `stop the agent first; if you interrupted it with Esc it has already stopped: pass --force`; exit 3. Recovery required: print the safety snapshot and the `remora rewind --snapshot <id>` command; exit 3.
@@ -1936,7 +1977,7 @@ A late point shows `(late)` after its kind. A rolled-back safety point shows its
 
 1. Every command accepts `--json`. The output is exactly one JSON object on stdout, followed by a newline.
 2. Every object has `"schema": "remora.<command>/<n>"` (for example `remora.status/1`, `remora.log/1`, `remora.rewind/1`, `remora.error/1`).
-3. A failure with `--json` prints `{"schema":"remora.error/1","kind":"<kind>","message":"<text>", ...detail}` on stdout, nothing on stderr, and uses the exit code of §13.3.
+3. A failure with `--json` prints `{"schema":"remora.error/1","kind":"<kind>","message":"<text>", ...detail}` on stdout, nothing on stderr, and uses the exit code of §13.3. Usage errors use the client-side kinds `usage` and `confirmation_required` (§10.12). `status --json` with no daemon is a report, not a failure: it prints `remora.status/1` with `daemon` set to `{"running": false, "failed": <the daemon.failed record or null>}` and no `project`, and exits 4.
 4. A schema version changes only when a field is removed or changes meaning. Adding a field keeps the version. Every schema has a golden file in `testdata/cli/` and a test that runs the command against an in-process daemon and compares.
 5. Times are `*_ms` integers. Paths are strings. Ids are lowercase hex strings.
 6. `--json` never prompts: `rewind` and `forget` with `--json` require `--yes`.
@@ -1946,7 +1987,7 @@ A late point shows `(late)` after its kind. A rolled-back safety point shows its
 1. Errors go to stderr as `remora: <message>`, plus one `hint:` line when an action fixes it.
 2. Colour only when stdout is a terminal and `NO_COLOR` is unset.
 3. No output claims a capability the command did not perform; the README and the CLI reference document only built behaviour.
-4. The CLI reference (`docs/cli.md`) is generated from the `clap` definitions by `xtask`, and CI fails if the committed file differs. Every command shown in the README quickstart runs in a test.
+4. The CLI reference (`docs/cli.md`) is generated from the `clap` definitions by the `remora-cli` example that `xtask cli-docs` runs (§3.2 rule 5), and CI fails if the committed file differs. Every command shown in the README quickstart runs in a test.
 
 ---
 
@@ -1988,12 +2029,14 @@ The daemon checks `config.toml`'s size, mtime and file id at most once every 5 s
 | `REMORA_LOG` | daemon, hook | log level |
 | `CLAUDE_CONFIG_DIR` | `init`, `uninit`, `status` | Claude Code settings directory |
 | `NO_COLOR` | CLI | disable colour |
-| `HOME`, `XDG_DATA_HOME` (Linux), `LOCALAPPDATA` (Windows) | all roles | default data directory (§6.1) |
+| `HOME` (Unix), `XDG_DATA_HOME` (Linux), `LOCALAPPDATA` (Windows) | all roles | default data directory (§6.1) and the home directory; on Windows the home directory is the profile directory of the process token (`GetUserProfileDirectoryW`), never `USERPROFILE` |
 | `XDG_CONFIG_HOME` (Linux) | `service` | systemd user unit directory |
 | `PATH` | `init`, `service install`, `status` | stable executable discovery (§11.6) |
 | `REMORA_TEST_FS`, `REMORA_EXPECT_CLONES`, `REMORA_TEST_SERVICE`, `REMORA_TEST_CLAUDE` | tests only | §17 |
 
 No other environment variable changes Remora's behaviour. In particular, the endpoint never depends on `XDG_RUNTIME_DIR` or `TMPDIR` (§10.2).
+
+Code reads these values only through an `Env` value (`remora_types::env::Env`), which the binary captures once from the running process (`remora_fs::env::capture`, which also reads the Windows home directory) and tests build from temporary paths (§17.1 rule 2, D-89).
 
 ---
 
@@ -2076,13 +2119,13 @@ Method:
 ### 16.2 Snapshot cost
 
 1. For an unchanged tree, a snapshot reads no file contents: `hashed_files = 0` and `bytes_read = 0`. A test asserts both.
-2. For a change of k files, `hashed_files = k` (plus files in the racy window) and stored bytes equal the changed files' sizes. A test asserts this for k = 1 and k = 10 on a 1,000-file tree.
+2. For a change of k files, `hashed_files = k` (plus files in the racy window) and `stored_bytes` (§7.1) equals the changed files' sizes when each has new content. A test asserts this for k = 1 and k = 10 on a 1,000-file tree.
 3. The metadata cost is one directory-enumeration record per entry (§7.4 rule 8), so it is O(entries): the walk visits every entry of the tree on every snapshot. Reading, hashing and storing scale with the changed files. The manifest is rewritten in full (about 100 bytes per entry) whenever anything changed; its bytes count toward the retention cap (§9.9). Snapshot cost therefore scales with changed files for file data, and with tree size for metadata; §21 lists this as an open question.
 4. Snapshots happen at turn start, before each `Bash` command, at turn end, and twice per rewind (safety and after apply), plus once per preview.
 
 ### 16.3 Process start
 
-A hook is a fresh process per event. Its cost outside §16.1 is process start: loading one binary, linked statically on Linux (musl) and dynamically against system libraries on macOS and Windows. It is reported by the benchmarks, not gated, because shared CI runners make process-level timings unreliable.
+A hook is a fresh process per event. Its cost outside §16.1 is process start: loading one binary, linked statically on Linux (musl) and dynamically against system libraries on macOS and Windows; the Windows build links the C runtime statically (`-C target-feature=+crt-static`), so it needs no Visual C++ runtime installed. It is reported by the benchmarks, not gated, because shared CI runners make process-level timings unreliable.
 
 ### 16.4 Benchmarks
 
@@ -2105,9 +2148,9 @@ Fixtures come from `remora-testkit` and live on `REMORA_TEST_FS` when it is set.
 The test strategy is D-47.
 
 
-1. **Deterministic.** No sleeps to order events. The clock (`Clock`), the process spawner, the lock factory and the transport are injected, so races are scripted. Time-dependent behaviour (6 h idle close, 1 h temporaries, retention ages, racy window) is tested with a manual clock or dated fixtures.
-2. **Hermetic.** `HOME`, `PATH`, `XDG_*`, `APPDATA`, `LOCALAPPDATA`, `CLAUDE_CONFIG_DIR`, the data directory and service definition locations are injected through an `Env` value. Tests never read or write the host's real settings, services, registry, data directory or any `.remora-store` outside a temporary directory. `remora-testkit` refuses to delete any path that is not inside a directory it created.
-3. **Preconditions asserted.** A test asserts that the situation it targets occurred: an unreadable-file test asserts the file is unreadable (it is skipped, with a message, when running as root); a property test asserts its tree is non-empty; a crash test asserts the intent record existed when the process was killed; a restore test asserts the tree differed before the restore.
+1. **Deterministic.** No sleeps to order events. The clock (`Clock`, with the `ManualClock` of `remora-testkit`), the process spawner, the lock factory and the transport are injected, so races are scripted. The client roles receive the spawner and the lock factory in one `remora_cli::Deps` value passed to `hook::run` and `remora_cli::run`; the fakes live in `remora-testkit`. Time-dependent behaviour (6 h idle close, 1 h temporaries, retention ages, racy window) is tested with a manual clock or dated fixtures.
+2. **Hermetic.** `HOME`, `PATH`, `XDG_*`, `APPDATA`, `LOCALAPPDATA`, `CLAUDE_CONFIG_DIR`, the data directory and service definition locations are injected through an `Env` value (§14.4). Tests never read or write the host's real settings, services, registry, data directory or any `.remora-store` outside a temporary directory. `remora-testkit` refuses to delete any path that is not inside a directory it created. The one exception: tests that install a real user service (systemd unit, launchd agent, Run entry) run only when `REMORA_TEST_SERVICE=1` is set; they are meant for disposable CI runners and never run by default.
+3. **Preconditions asserted.** A test asserts that the situation it targets occurred: an unreadable-file test asserts the file is unreadable (it is skipped, with a message, when running as root); a property test counts the non-empty trees of its run and fails the run if there were none (§17.3 also generates empty trees); a crash test asserts the intent record existed when the process was killed; a restore test asserts the tree differed before the restore.
 4. **Regression tests fail without their fix.** A regression test MUST fail against the code without the fix.
 5. **No crash injection in product code.** Crash behaviour is tested from states (§17.6) and real process kills, never with test-only hooks compiled into the product.
 6. **Leak-free.** In-process daemons and spawned processes are wrapped in guards that stop or kill them on drop, including on panic.
@@ -2159,7 +2202,7 @@ Properties: snapshot, mutate, restore gives the snapshot's tree; a sequence of t
 | CLI JSON | `testdata/cli/` | every `remora.<command>/<n>` schema |
 | Format fixtures | `testdata/formats/` | each released version of every format in §6.4 |
 
-Wire goldens are generated from the types by `xtask golden` and committed, so every wire change shows in the diff; CI fails if regeneration changes a file. A test enumerates every variant of the request, response and `ErrorKind` enums (through an exhaustive `match` that fails to compile when a variant is added) and fails if a variant has no golden.
+Wire goldens are generated from the types by the `remora-types` example that `xtask golden` runs (§3.2 rule 5) and committed, so every wire change shows in the diff; CI fails if regeneration changes a file. A test enumerates every variant of the request, response and `ErrorKind` enums (through an exhaustive `match` that fails to compile when a variant is added) and fails if a variant has no golden.
 
 ### 17.5 Real filesystems
 
@@ -2169,22 +2212,23 @@ Wire goldens are generated from the types by `xtask golden` and committed, so ev
 | btrfs | Linux runner, loop-mounted 1 GiB image | yes |
 | XFS (`reflink=1`) | Linux runner, loop-mounted 1 GiB image | yes |
 | APFS | macOS runner temp directory | yes |
+| APFS, second volume | macOS runner, a disk image created with `hdiutil create -fs APFS` and attached with `hdiutil attach -owners on` so ownership is honoured [verify] | yes |
 | NTFS | Windows runner `C:` | no |
-| ReFS Dev Drive | Windows Server 2025 runner, a 4 GiB VHDX formatted as a Dev Drive by a repository script | yes |
+| ReFS Dev Drive | Windows Server 2025 runner, a dynamically expanding 50 GB VHDX (the minimum size of a Dev Drive) formatted as a Dev Drive by a repository script | yes |
 
-The conformance suite, the engine rewind tests and the per-volume store tests run on each with `REMORA_TEST_FS=<dir>` and `REMORA_EXPECT_CLONES` set from the table. For the per-volume store, the data directory stays on the runner's root filesystem and the project is on the mounted filesystem, so the blob home of §7.7 is exercised with clones (btrfs, XFS, ReFS) and its permissions are read back.
+The `remora-fs` tests, the conformance suite, the engine rewind tests and the per-volume store tests run on each with `REMORA_TEST_FS=<dir>` and `REMORA_EXPECT_CLONES` set from the table. For the per-volume store, the data directory stays on the runner's root filesystem and the project is on the mounted filesystem, so the blob home of §7.7 is exercised with clones (btrfs, XFS, ReFS, the APFS second volume) and its permissions are read back.
 
 ### 17.6 Crash tests
 
 1. **State-based:** for each state of §9.7's diagram (intent written; staged; applied after 0, 1, half and all keys), the test builds that state on disk (intent row, staging directory, partially changed tree) and opens the project. It asserts the tree equals the safety snapshot, the rollback entry exists, the intent row is gone, and the notice is queued.
 2. **Failed rollback:** a blob of the safety snapshot is removed before reopening. The project is in recovery; snapshotting requests are served and carry the `recovery_required` notice; `rewind`, `preview` and `prune` are refused; `restore_snapshot` succeeds and clears it.
-9. **Restore in recovery interrupted:** in recovery, `restore_snapshot` is killed after its intent handover (§9.7); at the next open the tree is rolled back by the new intent row, the interrupted rewind's entry exists once, and no `recovery` row remains.
 3. **Real kill (Linux, macOS):** a real `remora daemon` rewinds a 5,000-file tree; the test kills it with `SIGKILL` as soon as the intent row is committed (observed through a read-only SQLite connection), asserts that the intent existed at kill time, starts a new daemon, and asserts the tree is wholly the safety state.
 4. **Journal:** a crash between commit and head write (head behind) is reconciled at open; a truncated database (head ahead) is reported by `verify` and recording continues.
 5. **Machine key:** 8 threads race to create the key; all end with the same valid key. A 0-byte or 31-byte key file is refused and not overwritten.
 6. **Bootstrap:** 8 threads open a new `journal.db` concurrently; exactly one creates the schema; all succeed.
 7. **Changes after a crash:** after the kill of item 3, the test edits a file in the tree, then reopens. The pre-rollback point (§9.7) exists, and rewinding to it restores the edit.
 8. **Completed but unjournaled:** an intent row with `completed_at_ms` is journaled at open and the tree is not rolled back.
+9. **Restore in recovery interrupted:** in recovery, `restore_snapshot` is killed after its intent handover (§9.7); at the next open the tree is rolled back by the new intent row, the interrupted rewind's entry exists once, and no `recovery` row remains.
 
 ### 17.7 Daemon tests
 
@@ -2235,8 +2279,10 @@ Triggers: pull requests, pushes to `main` and to branches matching `ci/**` (so w
 |---|---|---|
 | `linux` | `ubuntu-latest` | `cargo fmt --check`; `cargo clippy --workspace --all-targets --locked` for `x86_64-unknown-linux-gnu`, and `cargo clippy` for the `x86_64-pc-windows-msvc` and `aarch64-apple-darwin` targets on the crates without C code (`remora-types`, `remora-fs` without the `sqlite` feature, `remora-ipc`, `remora-host`); `cargo test --workspace --locked` (`REMORA_EXPECT_CLONES=0`); `cargo doc --no-deps` (`-D warnings`); `xtask layers`; `xtask golden --check`; `xtask cli-docs --check`; `cargo deny check`; MSRV `cargo +<msrv> check --workspace --all-targets --locked`; latency gate (§16.1) in release mode |
 | `macos` | `macos-latest` (APFS) | `cargo test --workspace --locked` with `REMORA_EXPECT_CLONES=1`; then `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| `windows` | `windows-2025` | create the ReFS Dev Drive; `cargo test --workspace --locked` on NTFS (`REMORA_EXPECT_CLONES=0`); `cargo test -p remora-store -p remora-engine` with `REMORA_TEST_FS=<dev drive>` and `REMORA_EXPECT_CLONES=1`; then `cargo clippy --workspace --all-targets --locked -- -D warnings` |
-| `fs` | `ubuntu-latest` | `apt-get update`, install `btrfs-progs` and `xfsprogs`; create and loop-mount btrfs, XFS (`reflink=1`) and ext4 images; build once; run the store and engine suites on each with `--no-fail-fast`, each step `if: success() \|\| failure()` so one filesystem's failure does not hide another's |
+| `windows` | `windows-2025` | create the ReFS Dev Drive; `cargo test --workspace --locked` on NTFS (`REMORA_EXPECT_CLONES=0`); `cargo test -p remora-fs -p remora-store -p remora-engine` with `REMORA_TEST_FS=<dev drive>` and `REMORA_EXPECT_CLONES=1`; then `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| `fs` | `ubuntu-latest` | `apt-get update`, install `btrfs-progs` and `xfsprogs`; create and loop-mount btrfs, XFS (`reflink=1`) and ext4 images; build once; run the `remora-fs`, store and engine suites on each with `--no-fail-fast`, each step `if: success() \|\| failure()` so one filesystem's failure does not hide another's |
+
+The `REMORA_EXPECT_CLONES` values in this table are those of the finished product. A job sets `1` for a filesystem only once the clone primitive for its OS exists (§4); before that it sets `0`.
 
 Cross-target clippy needs only the standard library of the target. Crates that compile C code (bundled SQLite) need the target's C toolchain, so they are linted in the `macos` and `windows` jobs instead, after the tests.
 
@@ -2262,19 +2308,19 @@ Cross-target clippy needs only the standard library of the target. Crates that c
 
 ### 19.1 Versioning
 
-1. Versions follow SemVer. Releases are cut by semantic-release from Conventional Commits on `main`: `fix:` and `perf:` give a patch, `feat:` a minor, `!` or `BREAKING CHANGE:` a major; other types give no release (D-49).
+1. Versions follow SemVer. Releases are cut by semantic-release from Conventional Commits on `main`: `fix:` and `perf:` give a patch, `feat:` a minor, `!` or `BREAKING CHANGE:` a major; other types give no release (D-49). This includes `revert:`, which the analyzer's default rules would release as a patch: `.releaserc.json` overrides it.
 2. Nothing is committed back to the repository. `Cargo.toml` keeps `version = "0.0.0"`; the build and publish jobs stamp the release version into `[workspace.package] version` and into internal dependency requirements before compiling, after checking that `Cargo.toml` and `Cargo.lock` contain the expected placeholder.
-3. A baseline annotated tag `v0.0.0` on the first public commit makes the first release `0.1.0`.
+3. A baseline annotated tag `v0.0.0` on the first public commit makes the first release `0.1.0`, provided at least one `feat:` commit follows it (with only `fix:` or `perf:` commits it would be `0.0.1`). A `build-only` run that reports `0.1.0` comes before the first `release` run.
 4. semantic-release and its plugins are run with `npx --yes` at pinned versions (no `package.json`); the `conventional-changelog-conventionalcommits` preset is pinned to 9.x. Configuration in `.releaserc.json`. Tags are `v<version>`; tags matching `v*` are protected.
 
 ### 19.2 Workflow `release`
 
-Trigger: a successful `ci` run on `main` (`workflow_run`), or manual dispatch with `mode: build-only | release` (default `build-only`). A `concurrency` group `release` (no cancellation) runs one release at a time.
+Trigger: a successful `ci` run on `main` (`workflow_run`), which runs in `release` mode when the repository variable `RELEASE_ENABLED` is `true` and otherwise stops before its first job (OQ-45), or manual dispatch with `mode: build-only | release` (default `build-only`). A `concurrency` group `release` (no cancellation) runs one release at a time.
 
 | Job | Does |
 |---|---|
 | `version` | semantic-release with `--dry-run` in both modes, so no tag exists yet; outputs `released`, `version`, `tag` |
-| `build` | matrix below; `cargo build --release --locked`; one archive per target containing `remora` (`remora.exe`), `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`; build attestation per archive (`actions/attest-build-provenance`) in release mode |
+| `build` | matrix below; `cargo build --release --locked` (the Windows target with `-C target-feature=+crt-static`, §16.3); one archive per target containing `remora` (`remora.exe`), `LICENSE-MIT`, `LICENSE-APACHE`, `README.md`; build attestation per archive (`actions/attest-build-provenance`) in release mode |
 | `checksums` | `SHA256SUMS` over all archives, attested |
 | `publish` | release mode only, after every `build` job and `checksums` succeeded: semantic-release for real, after asserting that the version it computes equals the `version` job's output (otherwise it fails without tagging); it creates the tag and the GitHub Release, and `@semantic-release/github` uploads the prepared archives and `SHA256SUMS` (D-79) |
 | `crates` | after `publish`: publishes to crates.io with trusted publishing (OIDC), in dependency order |
@@ -2304,7 +2350,7 @@ Attestations need a public repository; while the repository is private, `build-o
 | `remora-cli` | yes | binary `remora` (`[[bin]] name = "remora"`); `remora` is taken on crates.io |
 | `remora-testkit`, `xtask` | no | `publish = false` |
 
-Every published crate has `description`, `license = "MIT OR Apache-2.0"`, `repository`, `homepage`, `readme`, `keywords`, `categories` and `rust-version`. Internal dependencies carry both `path` and `version`. `cargo publish --dry-run` for every crate in order runs in `build-only` mode. Trusted publishing requires each crate to exist, so the first publish of each crate is done once by hand.
+Every published crate has `description`, `license = "MIT OR Apache-2.0"`, `repository`, `homepage`, `readme`, `keywords`, `categories` and `rust-version`. Internal normal and build dependencies carry both `path` and `version`; dev-dependencies on `remora-testkit` carry `path` only, which cargo strips at publish. `cargo publish --workspace --dry-run --locked` runs in `build-only` mode: it packages every published crate in dependency order and verifies each against the others before any of them is on crates.io (Cargo 1.90 or later, which the pinned toolchain provides). A per-crate `cargo publish --dry-run` cannot resolve internal crates that are not published yet. Trusted publishing requires each crate to exist, so the first publish of each crate is done once by hand.
 
 ### 19.4 Packages
 
@@ -2314,7 +2360,7 @@ Every published crate has `description`, `license = "MIT OR Apache-2.0"`, `repos
 
 ### 19.5 Verifying a download
 
-The README documents `sha256sum -c SHA256SUMS` and `gh attestation verify <archive> --repo wolfware-labs/remora`. No paid code-signing certificates are used.
+The README documents `sha256sum -c --ignore-missing SHA256SUMS` on Linux, `shasum -a 256 -c --ignore-missing SHA256SUMS` on macOS [verify], `Get-FileHash -Algorithm SHA256 <archive>` compared with the archive's line of `SHA256SUMS` on Windows (`--ignore-missing` skips the archives the user did not download), and `gh attestation verify <archive> --repo wolfware-labs/remora`. No paid code-signing certificates are used.
 
 ---
 
@@ -2364,7 +2410,7 @@ Each decision has an id that sections cite. "Rejected" names the main alternativ
 | D-38 | Hooks always exit 0, catch panics and argument errors, and print at most one `systemMessage` per session per reason. | Exit 2 blocks the agent, and repeated warnings are noise. | Letting the argument parser exit. |
 | D-39 | User-wide hooks, git-root scoping, a session root fixed at the session's first event, `tool_use_id` pairing. | One `init` covers every project and the root cannot drift during a session. | Per-project hooks; resolving the root per event. |
 | D-40 | Checkpoints before `Bash` only, not before edit tools. | Edits are covered by turn points and the host's own rewind, and a walk per edit multiplies snapshot cost. | Checkpoints before every `Edit` and `Write`. |
-| D-41 | CLI: numbered `log`, `rewind #N` preview then y/N, `--yes` required without a terminal, exit codes 0 to 4, `--json` on every command with versioned schemas, partial rewind exits 1. | It is scriptable and never acts on an unconfirmed or stale preview. | An interactive TUI as the only interface. |
+| D-41 | CLI: numbered `log`, `rewind N` preview then y/N, `--yes` required without a terminal, exit codes 0 to 4, `--json` on every command with versioned schemas, partial rewind exits 1. | It is scriptable and never acts on an unconfirmed or stale preview. | An interactive TUI as the only interface. |
 | D-42 | `config.toml`; invalid means defaults plus a visible `config_problem`; changes apply without restart. | A typo must not stop recording, and must not go unnoticed. | Refusing to start on invalid config. |
 | D-43 | Threat model of §15: other users are the adversary; same-user accidents are prevented; same-user malice is best-effort. | It matches what a local tool can enforce without privileges. | Treating the agent as hostile. |
 | D-44 | Owner-only from creation; never create then restrict. | A create-then-chmod window exposes copies of secrets to other users. | Default umask with a later chmod. |
@@ -2410,6 +2456,10 @@ Each decision has an id that sections cite. "Rejected" names the main alternativ
 | D-84 | Only start failures that persist across restarts write `daemon.failed`; expired lock waits do not. | A normal upgrade under parallel hooks must not block every hook for 60 s. | Recording every exit 1 |
 | D-85 | An append-only `machine.keys.log` lists every key the data directory has used; the machine key is re-appended at every open and a missing log is recreated; verify reports keys absent from it as `foreign_keys` next to `intact`, as a warning. | `meta.verifying_keys` is unsigned, so a re-signed journal must not pass unnoticed, while a copied journal must not hide later breaks. | Signing each key change with the previous key; `foreign_key` as a broken link |
 | D-86 | In recovery, `restore_snapshot` hands over the intent in one transaction: journal the interrupted rewind, delete the old intent and recovery rows, insert its own intent. | Exactly one intent row exists at every moment, so a crash always has one recovery path. | Deleting the old row only after the restore succeeds |
+| D-87 | Generators that need workspace types (wire goldens, the CLI reference) are examples of the crate that owns the types; `xtask` runs them and keeps no workspace dependency (§3.2 rule 5). | `xtask layers` needs no exception, and the generated files come from the definitions the product itself uses. | An `xtask` that depends on `remora-types` and `remora-cli`; rendering the reference from `remora help` text |
+| D-88 | On Windows the daemon observes the end of the user's session through a hidden top-level window that handles `WM_QUERYENDSESSION` and `WM_ENDSESSION` (§11.1). | A process without a console receives no console control events, and the window messages are how a windowless process learns of logoff. | Relying on termination at logoff and recovery alone |
+| D-89 | Product code reads environment variables and the home directory only through an `Env` value in `remora-types`, captured once from the process by `remora-fs` (§14.4). | Tests stay hermetic without a product crate depending on the dev-only test kit. | Reading `std::env` where a value is needed |
+| D-90 | Pin rows of shared reasons are recomputed from all their holders in the transaction that changes a holder; `remora_engine::pins` is their only writer (§9.9). | Rows are keyed by snapshot and reason, so deleting one holder's row would unpin another holder of the same snapshot. | Inserting and deleting one row per holder |
 
 ---
 
@@ -2442,8 +2492,8 @@ Choices not yet confirmed. Each row states the default the implementation uses u
 | OQ-21 | Which roots are refused? | Filesystem root, home directory, volume root, data directory overlap (D-66). |
 | OQ-22 | When do config changes apply? | Checked at most every 5 s, applied to later requests (D-69). |
 | OQ-23 | MSRV and toolchain? | Exact pinned stable toolchain; MSRV 1.89, checked inside `linux` (D-70). |
-| OQ-24 | Are the crate names `remora-types`, `remora-fs`, `remora-store`, `remora-host` free on crates.io? | Check before the first publish; fall back to a `remora-core-` prefix for any taken name. |
-| OQ-25 | May `remora_fs::sys` use `libc` for macOS calls `rustix` lacks? | Yes, only for `fclonefileat` and `acl_set_fd_np` (§3.5). |
+| OQ-24 | Are the names of the nine published crates (`remora-types`, `remora-fs`, `remora-store`, `remora-journal`, `remora-engine`, `remora-ipc`, `remora-daemon`, `remora-host`, `remora-cli`) free on crates.io? | Check before the first publish; fall back to a `remora-core-` prefix for any taken name. |
+| OQ-25 | May `remora_fs::sys` use `libc` for macOS calls `rustix` lacks? | Yes, only for the calls §3.5 lists (`fclonefileat`, `acl_init`, `acl_set_fd_np`, `acl_free`, `getentropy`, `fpathconf`); a further call is added to that list first. |
 | OQ-26 | Is the session root fixed per session or per turn? | Per session, at its first event (D-39). |
 | OQ-27 | How long are unreferenced manifests and preview pins kept? | 1 hour each (§9.9). |
 | OQ-28 | When does an idle project worker exit? | After 30 minutes without requests (§3.3). |
@@ -2463,6 +2513,7 @@ Choices not yet confirmed. Each row states the default the implementation uses u
 | OQ-42 | On-disk names: `machine.key`, `daemon.lock`, `daemon.secret`, `daemon.sock`, `daemon.failed`, `logs/`, `hook/`, the `remora.service` unit, `settings.json.remora-backup`. Keep them? | Yes, as §6.2, §11.7 and §12.5 list them. |
 | OQ-43 | Should a moved data directory keep its blob homes on other volumes (a relink command), or must such projects be forgotten? | Forget: v1 has no relink; `status` names the recorded data directory (§6.1). |
 | OQ-44 | Should a user be able to accept the keys of a journal copied from another data directory (for example `remora verify --accept-key <fingerprint>`, appending to `machine.keys.log`)? | Not in v1: the `foreign_keys` warning stays for the life of the journal. |
+| OQ-45 | How are automatic releases from `main` held back until the repository is public and the channels are set up? | A `workflow_run` trigger runs in `release` mode only when the repository variable `RELEASE_ENABLED` is `true`, and otherwise stops before its first job; `build-only` runs are manual dispatches (§19.2). |
 
 ---
 
