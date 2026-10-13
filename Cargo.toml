@@ -17,9 +17,17 @@ members = [
 [workspace.package]
 version = "0.0.0"
 edition = "2024"
+rust-version = "1.89"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/wolfware-labs/remora"
 homepage = "https://github.com/wolfware-labs/remora"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
 
 [workspace.dependencies]
 remora-types = { path = "crates/remora-types", version = "0.0.0" }

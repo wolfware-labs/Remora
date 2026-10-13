@@ -3,9 +3,19 @@ name = "remora-fs"
 description = "Filesystem and OS safety primitives for Remora."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+
+# Not inherited from the workspace: `remora_fs::sys` allows unsafe code, which
+# `forbid` would not permit. Keep the clippy entries in step with the workspace.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
 
 [features]
 sqlite = []
