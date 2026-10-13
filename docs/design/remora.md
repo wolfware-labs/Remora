@@ -2277,7 +2277,7 @@ Triggers: pull requests, pushes to `main` and to branches matching `ci/**` (so w
 
 | Job | Runner | Steps |
 |---|---|---|
-| `linux` | `ubuntu-latest` | `cargo fmt --check`; `cargo clippy --workspace --all-targets --locked` for `x86_64-unknown-linux-gnu`, and `cargo clippy` for the `x86_64-pc-windows-msvc` and `aarch64-apple-darwin` targets on the crates without C code (`remora-types`, `remora-fs` without the `sqlite` feature, `remora-ipc`, `remora-host`); `cargo test --workspace --locked` (`REMORA_EXPECT_CLONES=0`); `cargo doc --no-deps` (`-D warnings`); `xtask layers`; `xtask golden --check`; `xtask cli-docs --check`; `cargo deny check`; MSRV `cargo +<msrv> check --workspace --all-targets --locked`; latency gate (§16.1) in release mode |
+| `linux` | `ubuntu-latest` | `cargo fmt --check`; `cargo clippy --workspace --all-targets --locked` for `x86_64-unknown-linux-gnu`, and `cargo clippy` for the `x86_64-pc-windows-msvc` and `aarch64-apple-darwin` targets on the crates without C code (`remora-types`, `remora-fs` without the `sqlite` feature, `remora-ipc`, `remora-host`); `cargo test --workspace --locked` (`REMORA_EXPECT_CLONES=0`); `cargo doc --no-deps` (`-D warnings`); `xtask layers`; `xtask golden --check`; `xtask cli-docs --check`; `cargo deny check`; latency gate (§16.1) in release mode |
 | `macos` | `macos-latest` (APFS) | `cargo test --workspace --locked` with `REMORA_EXPECT_CLONES=1`; then `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | `windows` | `windows-2025` | create the ReFS Dev Drive; `cargo test --workspace --locked` on NTFS (`REMORA_EXPECT_CLONES=0`); `cargo test -p remora-fs -p remora-store -p remora-engine` with `REMORA_TEST_FS=<dev drive>` and `REMORA_EXPECT_CLONES=1`; then `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | `fs` | `ubuntu-latest` | `apt-get update`, install `btrfs-progs` and `xfsprogs`; create and loop-mount btrfs, XFS (`reflink=1`) and ext4 images; build once; run the `remora-fs`, store and engine suites on each with `--no-fail-fast`, each step `if: success() \|\| failure()` so one filesystem's failure does not hide another's |
@@ -2297,7 +2297,7 @@ Cross-target clippy needs only the standard library of the target. Crates that c
 ### 18.4 Toolchain and dependencies
 
 1. `rust-toolchain.toml` pins an exact stable version (with `rustfmt` and `clippy`), so a new lint never fails CI without a commit that bumps it (D-70).
-2. The workspace declares `rust-version` (the MSRV). The MSRV check builds with it. Raising it is allowed in a minor release and is noted in the release notes.
+2. The workspace declares `rust-version` (the MSRV) equal to the pinned toolchain, so the toolchain CI builds with is the MSRV and no separate MSRV check exists. The pin tracks the latest stable release: a bump moves `rust-toolchain.toml` and `rust-version` together in one commit and is noted in the release notes.
 3. Dependabot updates Cargo dependencies (grouped weekly) and GitHub Actions SHAs.
 4. `Cargo.lock` is committed; every cargo command in CI uses `--locked`.
 5. Workspace lints: `unsafe_code = "forbid"` (except `remora-fs`, §3.5), `clippy::unwrap_used = "deny"` and `clippy::expect_used = "deny"` outside tests; an `expect` that encodes an invariant is allowed with `#[allow]` and a comment stating the invariant (D-73).
@@ -2417,7 +2417,7 @@ Each decision has an id that sections cite. "Rejected" names the main alternativ
 | D-45 | No network calls and no telemetry, enforced by a dependency ban. | The store holds secrets, and a local tool needs no network. | Opt-in telemetry. |
 | D-46 | Hook p99 below 50 ms over 200 in-process calls, nearest-rank, release build, serial, as a CI gate. | Process-level wall-clock timings are noisy on shared runners; in-process timings are stable enough for a gate. | Median of 20 process starts. |
 | D-47 | Testing per §17: conformance through `Snapshotter`, property tests, real filesystems, golden wire and encoding vectors, deterministic and hermetic tests, no crash injection in the product. | Each layer checks a failure mode the others cannot reach, and preconditions asserted in each test prevent vacuous passes. | Mock-only unit tests. |
-| D-48 | Four consolidated CI jobs (`linux`, `macos`, `windows`, `fs`), actions pinned by SHA, MSRV and layering checks inside `linux`, clippy for crates with C code inside `macos` and `windows`. | CI minutes are billed per job and macOS and Windows minutes cost more; bundled SQLite needs the target's C toolchain to lint. | One job per check and per OS. |
+| D-48 | Four consolidated CI jobs (`linux`, `macos`, `windows`, `fs`), actions pinned by SHA, layering check inside `linux`, clippy for crates with C code inside `macos` and `windows`. | CI minutes are billed per job and macOS and Windows minutes cost more; bundled SQLite needs the target's C toolchain to lint. | One job per check and per OS. |
 | D-49 | semantic-release without commit-back, version stamped at build, checksums and attestations, crates.io trusted publishing, Homebrew tap, winget, smoke test on released binaries. | Signed-commit rules forbid bot commits, and every channel is verified after publishing. | release-plz with version commits; paid code signing. |
 | D-50 | Retention: 30 days and 10 GB per project by default; pins are explicit rows; the sweep runs only when every manifest was read. | Protection by explicit reference cannot be broken by file times, and a partial read must not delete live blobs. | Pruning by manifest mtime; 7 days and 5 GB. |
 | D-51 | Open turns, commands, points, pins, the intent record and recovery state live in `journal.db` beside the signed entries. | Closing a turn and appending its entry become one transaction, and there are no per-session state files to damage. | One JSON file per open session plus `rewind.json`. |
@@ -2439,7 +2439,7 @@ Each decision has an id that sections cite. "Rejected" names the main alternativ
 | D-67 | `.remora-ignore` lines: `*` or empty file opts out, `<name>/` excludes a name, `/<path>` excludes a path. | A `*` line or an empty file opts out; the other two forms add exclusions without full gitignore semantics. | Full `.gitignore` syntax. |
 | D-68 | A head conflict is recorded and reported, and recording continues. | Protecting files matters more than a clean chain, and the conflict stays visible. | Refusing appends until the user acts. |
 | D-69 | Config is re-checked at most every 5 seconds and applies to requests started afterwards. | No restart is needed and the check is cheap. | Reading config only at start. |
-| D-70 | `rust-toolchain.toml` pins an exact stable version; the MSRV is checked as a step of `linux`. | New lints should arrive by a deliberate commit, and a fifth job costs minutes. | Floating stable; a separate MSRV job. |
+| D-70 | `rust-toolchain.toml` pins the latest stable version, and `rust-version` equals it. | New lints should arrive by a deliberate commit, and an MSRV equal to the pin needs no separate check or job. | Floating stable; an older MSRV with its own check. |
 | D-71 | Repository checks (layers, goldens, CLI docs) are `xtask` subcommands. | They run the same way locally and in CI. | Shell scripts in the workflow. |
 | D-72 | A project in recovery keeps recording; only `rewind`, `preview` and `prune` are refused. | Snapshots do not change the tree, and points are the user's protection while the project needs a manual restore. | Refusing snapshotting requests until the user acts |
 | D-73 | `clippy::unwrap_used` and `clippy::expect_used` are denied outside tests; invariant `expect`s need an `allow` with a comment. | A panic in a hook or worker turns into a protection gap. | Warn only. |
@@ -2491,7 +2491,7 @@ Choices not yet confirmed. Each row states the default the implementation uses u
 | OQ-20 | `.remora-ignore` syntax? | §7.8 rule 3 (D-67). |
 | OQ-21 | Which roots are refused? | Filesystem root, home directory, volume root, data directory overlap (D-66). |
 | OQ-22 | When do config changes apply? | Checked at most every 5 s, applied to later requests (D-69). |
-| OQ-23 | MSRV and toolchain? | Exact pinned stable toolchain; MSRV 1.89, checked inside `linux` (D-70). |
+| OQ-23 | MSRV and toolchain? | The latest stable toolchain, pinned exactly; the MSRV equals the pin (D-70). |
 | OQ-24 | Are the names of the nine published crates (`remora-types`, `remora-fs`, `remora-store`, `remora-journal`, `remora-engine`, `remora-ipc`, `remora-daemon`, `remora-host`, `remora-cli`) free on crates.io? | Check before the first publish; fall back to a `remora-core-` prefix for any taken name. |
 | OQ-25 | May `remora_fs::sys` use `libc` for macOS calls `rustix` lacks? | Yes, only for the calls §3.5 lists (`fclonefileat`, `acl_init`, `acl_set_fd_np`, `acl_free`, `getentropy`, `fpathconf`); a further call is added to that list first. |
 | OQ-26 | Is the session root fixed per session or per turn? | Per session, at its first event (D-39). |
@@ -2505,7 +2505,7 @@ Choices not yet confirmed. Each row states the default the implementation uses u
 | OQ-34 | Separate `xtask` crate for repository checks? | Yes (D-71). |
 | OQ-35 | Where does SQLite connection setup live: a `sqlite` feature of `remora-fs` or a separate `remora-db` crate between `remora-fs` and `remora-store`/`remora-journal`? | `remora_fs::sqlite` behind a feature (D-80). |
 | OQ-36 | Snapshot metadata cost is O(entries) (one walk per snapshot, a full manifest per changed snapshot), while file data cost scales with changed files. Is that acceptable for v1? | Yes, with the non-gating 100,000-file benchmark (target p50 under 500 ms on Linux) measured before the first release (§16.2, §16.4). |
-| OQ-37 | Is the MSRV check a step of the `linux` job or a separate job? | A step of `linux` (D-70). |
+| OQ-37 | Is the MSRV check a step of the `linux` job or a separate job? | Neither: the MSRV equals the pinned toolchain, so the regular build covers it (D-70). |
 | OQ-38 | What makes a preview stale: any tree change, or a change to what the rewind would do? | A different `restore_digest` (D-65). |
 | OQ-39 | Exit code 3 also covers `pruned`, `preview_stale`, `recovery_required` and refused roots; exit code 4 also covers a daemon that cannot start or is too new. Keep these meanings? | Yes, as §13.3 lists them. |
 | OQ-40 | Is the stat cache a SQLite database (`cache.db`) or a flat file? | `cache.db` (§7.4). |
