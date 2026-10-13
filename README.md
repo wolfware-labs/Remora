@@ -60,7 +60,7 @@ whether the hooks and the login service point at the `remora` you have installed
 
 | Command | What it does |
 |---------|--------------|
-| `remora init` / `remora uninit` | Install / remove the Claude Code hooks (and the login service) |
+| `remora init` / `remora uninit` | Install the Claude Code hooks and the login service / remove the hooks (`remora service uninstall` removes the service) |
 | `remora status` | The daemon, the hooks, and what is recorded for this project |
 | `remora log` | Restore points, newest first (`--all`, `-n`, `--json`) |
 | `remora rewind <n>` | Rewind to restore point `n` (`--yes` to skip the question) |
