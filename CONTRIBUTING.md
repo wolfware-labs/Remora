@@ -16,7 +16,7 @@ The design is in the [technical specification](docs/design/remora.md). Section 3
 
 ## Checks
 
-CI runs these on every pull request. Run them locally before pushing:
+CI runs these on every pull request that changes more than Markdown files; a change to Markdown only skips the build. Run them locally before pushing:
 
 | Check | Command | CI job |
 | --- | --- | --- |
