@@ -2,7 +2,7 @@
 
 Remora records what an AI coding agent does to a project's files and lets you rewind the project to any recorded point. It captures at the filesystem level, so changes made by shell commands (`rm`, `mv`, `sed -i`, build tools) are restored as well as changes made by the agent's own edit tools. Every turn goes into a signed, hash-chained journal. It runs locally, makes no network calls and sends no telemetry.
 
-The first host is [Claude Code](https://docs.claude.com/en/docs/claude-code/overview), through its hooks. Linux, macOS and Windows are supported.
+The first host is [Claude Code](https://code.claude.com/docs/en/overview), through its hooks. Linux, macOS and Windows are supported.
 
 ## Status
 
