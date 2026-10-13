@@ -41,7 +41,10 @@ jobs:
             exit 0
           fi
           skip='(\.md$|^\.releaserc\.json$|^\.github/workflows/release\.yml$)'
-          if git diff --name-only "$BASE" HEAD | grep -qvE "$skip"; then
+          # A file, not a pipe: with pipefail, `grep -q` closing a pipe early
+          # would fail `git diff` and skip a real code change.
+          git diff --name-only "$BASE" HEAD > "$RUNNER_TEMP/changed-files"
+          if grep -qvE "$skip" "$RUNNER_TEMP/changed-files"; then
             echo "code=true" >> "$GITHUB_OUTPUT"
           else
             echo "code=false" >> "$GITHUB_OUTPUT"
