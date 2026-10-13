@@ -16,7 +16,7 @@ The design is in the [technical specification](docs/design/remora.md). Section 3
 
 ## Checks
 
-CI runs these on every pull request that changes more than Markdown files; a change to Markdown only skips the build. Run them locally before pushing:
+CI runs these on every pull request, except one that changes only Markdown files, `.releaserc.json` or `.github/workflows/release.yml`, which skips the build. Run them locally before pushing:
 
 | Check | Command | CI job |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ CI runs these on every pull request that changes more than Markdown files; a cha
 | Crate layers | `cargo xtask layers` | `linux` |
 | Dependency policy | `cargo deny check` | `linux` |
 
-CI also sets `RUSTFLAGS=-D warnings`, so a warning fails the build. On Windows PowerShell, set the flags with `$env:RUSTFLAGS="-D warnings"` and `$env:RUSTDOCFLAGS="-D warnings"`.
+CI also sets `RUSTFLAGS=-D warnings`, so a warning fails the build. Set the same flags locally: `export RUSTFLAGS="-D warnings" RUSTDOCFLAGS="-D warnings"` in a Unix shell, or `$env:RUSTFLAGS="-D warnings"` and `$env:RUSTDOCFLAGS="-D warnings"` in PowerShell.
 
 `linux` also lints the crates that compile no C code for the Windows and macOS targets. To run that locally:
 
