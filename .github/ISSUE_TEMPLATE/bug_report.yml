@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in Remora behaves differently from the docs or the spec.
+labels: ["kind/bug", "needs-triage"]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran and the files involved. A minimal project is the fastest way to a fix.
+      render: shell
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Remora version or commit
+      description: Output of `remora --version`, or a commit hash.
+    validations:
+      required: true
+  - type: dropdown
+    id: platforms
+    attributes:
+      label: Platforms
+      multiple: true
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+  - type: input
+    id: filesystem
+    attributes:
+      label: Filesystem
+      description: For example ext4, btrfs, APFS, NTFS or ReFS.
+  - type: input
+    id: host
+    attributes:
+      label: Claude Code version
+      description: Output of `claude --version`, if the problem involves a session.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Include the output of `remora status`. Check it for paths or secrets you do not want to share.
+      render: text
