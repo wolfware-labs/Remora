@@ -34,6 +34,7 @@ CI also sets `RUSTFLAGS=-D warnings`, so a warning fails the build. On Windows P
 ```sh
 rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
 cargo clippy --locked --target x86_64-pc-windows-msvc -p remora-types -p remora-fs -p remora-ipc -p remora-host
+cargo clippy --locked --target aarch64-apple-darwin -p remora-types -p remora-fs -p remora-ipc -p remora-host
 ```
 
 ## Code rules
