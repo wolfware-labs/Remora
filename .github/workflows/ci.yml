@@ -1,0 +1,141 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, "ci/**"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Decides whether the change needs a build. Jobs skipped through `if:` report
+  # success, so a Markdown-only change never leaves a check pending.
+  changes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: filter
+        shell: bash
+        env:
+          BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          # No usable base (manual run, new branch): build.
+          if [ -z "$BASE" ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          skip='(\.md$|^\.releaserc\.json$|^\.github/workflows/release\.yml$)'
+          # A file, not a pipe: with pipefail, `grep -q` closing a pipe early
+          # would fail `git diff` and skip a real code change.
+          git diff --name-only "$BASE" HEAD > "$RUNNER_TEMP/changed-files"
+          if grep -qvE "$skip" "$RUNNER_TEMP/changed-files"; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # Checks after the first run with `!cancelled()`, so one run reports every
+  # failing check instead of stopping at the first.
+  linux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      REMORA_EXPECT_CLONES: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: |
+          rustup toolchain install
+          rustup target add x86_64-pc-windows-msvc aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - uses: taiki-e/install-action@1168f6810a3cb30a3514bf5756a3b7f0422c6df8 # v2.87.28
+        with:
+          tool: cargo-deny
+      - name: rustfmt
+        run: cargo fmt --all --check
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace --all-targets --locked
+      # Crates that compile no C need only the target's standard library.
+      - name: clippy (windows and macos targets)
+        if: ${{ !cancelled() }}
+        run: |
+          for target in x86_64-pc-windows-msvc aarch64-apple-darwin; do
+            cargo clippy --locked --target "$target" \
+              -p remora-types -p remora-fs -p remora-ipc -p remora-host
+          done
+      - name: test
+        if: ${{ !cancelled() }}
+        run: cargo test --workspace --locked
+      - name: doc
+        if: ${{ !cancelled() }}
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps --locked
+      - name: xtask layers
+        if: ${{ !cancelled() }}
+        run: cargo xtask layers
+      - name: cargo deny
+        if: ${{ !cancelled() }}
+        run: cargo deny check
+
+  macos:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: macos-latest
+    timeout-minutes: 30
+    env:
+      REMORA_EXPECT_CLONES: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: test
+        run: cargo test --workspace --locked
+      # Lints the crates that compile C, reusing the test build.
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace --all-targets --locked
+
+  windows:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      REMORA_EXPECT_CLONES: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: test (NTFS)
+        run: cargo test --workspace --locked
+      - name: clippy
+        if: ${{ !cancelled() }}
+        run: cargo clippy --workspace --all-targets --locked
