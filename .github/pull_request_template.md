@@ -9,6 +9,6 @@
 - [ ] One issue per pull request, linked below with `Closes #<number>`.
 - [ ] Tests added or updated for the changed behavior.
 - [ ] The spec (`docs/design/remora.md`) updated in this pull request if behavior changes.
-- [ ] Every check in [CONTRIBUTING.md](../blob/main/CONTRIBUTING.md#checks) passes locally.
+- [ ] Every check in [CONTRIBUTING.md](https://github.com/wolfware-labs/remora/blob/main/CONTRIBUTING.md#checks) passes locally.
 
 Closes #
