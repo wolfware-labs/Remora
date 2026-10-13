@@ -3,9 +3,13 @@ name = "remora-cli"
 description = "Records what an AI coding agent does to a project's files and rewinds it to any recorded point."
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 homepage.workspace = true
+
+[lints]
+workspace = true
 
 [lib]
 path = "src/lib.rs"

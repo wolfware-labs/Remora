@@ -1,5 +1,8 @@
 //! Repository checks. Run as `cargo xtask <command>`.
 
+// Developer tool: a failed unwrap is a failed check.
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 mod layers;
 
 use std::path::Path;
