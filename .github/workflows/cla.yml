@@ -14,6 +14,12 @@ permissions:
   pull-requests: write
   statuses: write
 
+# Runs one at a time: the action updates signatures/cla.json without retrying,
+# so two runs writing at once would drop one signature.
+concurrency:
+  group: cla-signatures
+  cancel-in-progress: false
+
 jobs:
   cla:
     runs-on: ubuntu-latest
@@ -26,6 +32,17 @@ jobs:
         (github.event.comment.body == 'recheck' ||
          github.event.comment.body == 'I have read the CLA document and I hereby sign the CLA'))
     steps:
+      # The action reads only the first 100 commits of a pull request.
+      - name: Check the commit count
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
+        run: |
+          commits="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .commits)"
+          if [ "$commits" -gt 100 ]; then
+            echo "::error::This pull request has $commits commits; the CLA check covers only 100. Squash it to 100 commits or fewer."
+            exit 1
+          fi
       - name: Check CLA signatures
         uses: wolfware-labs/cla-action@ebeb701a6dddbd47e86651cf6f85e951538cd2b8 # node24 runtime
         env:
