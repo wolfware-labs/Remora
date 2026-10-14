@@ -134,8 +134,88 @@ jobs:
       - name: Install toolchain
         run: rustup toolchain install
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Create ReFS Dev Drive
+        id: devdrive
+        shell: pwsh
+        run: .github/scripts/new-dev-drive.ps1
       - name: test (NTFS)
         run: cargo test --workspace --locked
+      - name: test (ReFS Dev Drive)
+        if: ${{ !cancelled() && steps.devdrive.outcome == 'success' }}
+        shell: pwsh
+        env:
+          REMORA_TEST_FS: ${{ steps.devdrive.outputs.path }}
+          REMORA_EXPECT_CLONES: "0"
+        run: |
+          if ($env:REMORA_EXPECT_CLONES -notin @('0', '1')) {
+            throw "REMORA_EXPECT_CLONES must be 0 or 1, got '$env:REMORA_EXPECT_CLONES'"
+          }
+          if (-not (Test-Path -LiteralPath $env:REMORA_TEST_FS -PathType Container)) {
+            throw "REMORA_TEST_FS is not a directory: '$env:REMORA_TEST_FS'"
+          }
+          $fs = (Get-Volume -FilePath $env:REMORA_TEST_FS).FileSystemType
+          if ($fs -ne 'ReFS') { throw "REMORA_TEST_FS is on $fs, expected ReFS" }
+          cargo test --locked --no-fail-fast -p remora-fs -p remora-store -p remora-engine
       - name: clippy
         if: ${{ !cancelled() }}
         run: cargo clippy --workspace --all-targets --locked
+
+  # The per-filesystem suites on loop-mounted images; one build for all three.
+  fs:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+      - name: Mount ext4, btrfs and XFS images
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq btrfs-progs xfsprogs > /dev/null
+          for fs in ext4 btrfs xfs; do
+            img="$RUNNER_TEMP/$fs.img"
+            truncate -s 1G "$img"
+            case "$fs" in
+              ext4) sudo mkfs.ext4 -q -F "$img" ;;
+              btrfs) sudo mkfs.btrfs -q "$img" ;;
+              xfs) sudo mkfs.xfs -q -m reflink=1 "$img" ;;
+            esac
+            sudo mkdir -p "/mnt/$fs"
+            sudo mount -o loop "$img" "/mnt/$fs"
+            # The tests run as the runner user, never as root (spec 17.1).
+            sudo chown "$(id -u):$(id -g)" "/mnt/$fs"
+            findmnt "/mnt/$fs"
+          done
+          # Clones on XFS need reflink; fail here rather than test without it.
+          info="$(xfs_info /mnt/xfs)"
+          if [[ "$info" != *reflink=1* ]]; then
+            echo "XFS image was created without reflink=1" >&2
+            exit 1
+          fi
+          echo "XFS reflink=1"
+      - name: Build the tests
+        run: cargo test --locked --no-run -p remora-fs -p remora-store -p remora-engine
+      # Each filesystem runs even when another failed.
+      - name: test (btrfs)
+        if: ${{ !cancelled() }}
+        env:
+          REMORA_TEST_FS: /mnt/btrfs
+          REMORA_EXPECT_CLONES: "0"
+        run: .github/scripts/test-on-fs.sh btrfs
+      - name: test (XFS)
+        if: ${{ !cancelled() }}
+        env:
+          REMORA_TEST_FS: /mnt/xfs
+          REMORA_EXPECT_CLONES: "0"
+        run: .github/scripts/test-on-fs.sh xfs
+      - name: test (ext4)
+        if: ${{ !cancelled() }}
+        env:
+          REMORA_TEST_FS: /mnt/ext4
+          REMORA_EXPECT_CLONES: "0"
+        run: .github/scripts/test-on-fs.sh ext2/ext3
