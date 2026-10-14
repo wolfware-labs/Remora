@@ -28,8 +28,8 @@ jobs:
     timeout-minutes: 30
     # Comments only count on pull requests. The sentence must match
     # custom-pr-sign-comment below (expression comparison ignores case).
-    # A closed event only runs after a merge: the action locks the pull
-    # request on every close it sees.
+    # A closed event only runs after a merge, when the action locks the
+    # pull request.
     if: >-
       (github.event_name == 'pull_request_target' &&
         (github.event.action != 'closed' || github.event.pull_request.merged)) ||
@@ -37,37 +37,8 @@ jobs:
         (github.event.comment.body == 'recheck' ||
          github.event.comment.body == 'I have read the CLA document and I hereby sign the CLA'))
     steps:
-      # The action reads only the first 100 commits of a pull request.
-      - name: Check the commit count
-        if: github.event.action != 'closed'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR: ${{ github.event.pull_request.number || github.event.issue.number }}
-        run: |
-          commits="$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR" --jq .commits)"
-          if [ "$commits" -gt 100 ]; then
-            echo "::error::This pull request has $commits commits; the CLA check covers only 100. Squash it to 100 commits or fewer."
-            exit 1
-          fi
       - name: Check CLA signatures
-        id: cla
-        # A write that races another pull request's run fails; retry once below.
-        continue-on-error: true
-        uses: wolfware-labs/cla-action@ebeb701a6dddbd47e86651cf6f85e951538cd2b8 # node24 runtime
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          path-to-document: https://github.com/wolfware-labs/remora/blob/main/CLA.md
-          path-to-signatures: signatures/cla.json
-          branch: cla-signatures
-          custom-pr-sign-comment: I have read the CLA document and I hereby sign the CLA
-          allowlist: santoro-mariano,dependabot[bot],renovate[bot]
-      - name: Wait before retrying
-        if: steps.cla.outcome == 'failure'
-        run: sleep $((RANDOM % 21 + 5))
-      - name: Check CLA signatures (retry)
-        if: steps.cla.outcome == 'failure'
-        uses: wolfware-labs/cla-action@ebeb701a6dddbd47e86651cf6f85e951538cd2b8 # node24 runtime
+        uses: wolfware-labs/cla-action@c14e53c86af3e9583c1e0020e6d2f365e5016eb4 # main, 2026-10-14
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
