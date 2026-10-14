@@ -191,7 +191,13 @@ jobs:
             sudo chown "$(id -u):$(id -g)" "/mnt/$fs"
             findmnt "/mnt/$fs"
           done
-          xfs_info /mnt/xfs | grep -o 'reflink=[01]'
+          # Clones on XFS need reflink; fail here rather than test without it.
+          info="$(xfs_info /mnt/xfs)"
+          if [[ "$info" != *reflink=1* ]]; then
+            echo "XFS image was created without reflink=1" >&2
+            exit 1
+          fi
+          echo "XFS reflink=1"
       - name: Build the tests
         run: cargo test --locked --no-run -p remora-fs -p remora-store -p remora-engine
       # Each filesystem runs even when another failed.
