@@ -37,6 +37,7 @@ jobs:
     steps:
       # The action reads only the first 100 commits of a pull request.
       - name: Check the commit count
+        if: github.event.action != 'closed'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number || github.event.issue.number }}
