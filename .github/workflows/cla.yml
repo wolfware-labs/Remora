@@ -26,8 +26,11 @@ jobs:
     timeout-minutes: 30
     # Comments only count on pull requests. The sentence must match
     # custom-pr-sign-comment below (expression comparison ignores case).
+    # A closed event only runs after a merge: the action locks the pull
+    # request on every close it sees.
     if: >-
-      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'pull_request_target' &&
+        (github.event.action != 'closed' || github.event.pull_request.merged)) ||
       (github.event.issue.pull_request &&
         (github.event.comment.body == 'recheck' ||
          github.event.comment.body == 'I have read the CLA document and I hereby sign the CLA'))
