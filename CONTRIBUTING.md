@@ -93,6 +93,12 @@ over the target, then fsync the directory, so a crash leaves either
 the old file or the new one.
 ```
 
+## Contributor Licence Agreement
+
+Every contributor signs the [Contributor Licence Agreement](CLA.md) once. You keep the copyright to your contribution, and Wolfware LLC can keep distributing the project, including under other licences.
+
+When you open your first pull request, a bot comments with a link to the agreement. Reply with the sentence it asks for, and the `CLA` check passes. A pull request is merged only after every author has signed.
+
 ## License
 
-By contributing, you agree that your contributions are dual licensed under the MIT and Apache 2.0 licenses, as described in the [README](README.md#license).
+By contributing, you agree that your contributions are dual licensed under the MIT and Apache 2.0 licenses, as described in the [README](README.md#license), and covered by the [Contributor Licence Agreement](CLA.md).
