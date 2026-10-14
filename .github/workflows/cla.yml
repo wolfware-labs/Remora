@@ -16,8 +16,10 @@ permissions:
 
 # One group per pull request. A newer run may replace a pending one, which
 # loses nothing: every run reads all of the pull request's comments again.
+# The merged-close run has its own group, so a comment run cannot replace it
+# and skip the lock.
 concurrency:
-  group: cla-${{ github.event.pull_request.number || github.event.issue.number }}
+  group: cla-${{ github.event.action == 'closed' && 'close-' || '' }}${{ github.event.pull_request.number || github.event.issue.number }}
   cancel-in-progress: false
 
 jobs:
@@ -62,7 +64,7 @@ jobs:
           allowlist: santoro-mariano,dependabot[bot],renovate[bot]
       - name: Wait before retrying
         if: steps.cla.outcome == 'failure'
-        run: sleep $((RANDOM % 20 + 5))
+        run: sleep $((RANDOM % 21 + 5))
       - name: Check CLA signatures (retry)
         if: steps.cla.outcome == 'failure'
         uses: wolfware-labs/cla-action@ebeb701a6dddbd47e86651cf6f85e951538cd2b8 # node24 runtime
