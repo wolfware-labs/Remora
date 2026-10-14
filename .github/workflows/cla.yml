@@ -9,6 +9,8 @@ on:
 permissions:
   actions: write
   contents: write
+  # The action locks a pull request's conversation after it merges.
+  issues: write
   pull-requests: write
   statuses: write
 
