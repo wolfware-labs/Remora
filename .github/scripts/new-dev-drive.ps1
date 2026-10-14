@@ -13,6 +13,7 @@ $script = Join-Path $env:RUNNER_TEMP 'devdrive.txt'
     "create vdisk file=`"$Vhd`" maximum=$SizeMB type=expandable",
     "select vdisk file=`"$Vhd`"",
     'attach vdisk',
+    'convert gpt',
     'create partition primary',
     "assign letter=$Letter"
 ) | Set-Content -Path $script -Encoding ascii
@@ -20,6 +21,7 @@ diskpart /s $script
 if ($LASTEXITCODE -ne 0) { throw "diskpart failed with exit code $LASTEXITCODE" }
 
 Format-Volume -DriveLetter $Letter -DevDrive -Confirm:$false -Force | Format-List
+(Get-Partition -DriveLetter $Letter | Get-Disk).PartitionStyle
 fsutil devdrv query "${Letter}:"
 if ($LASTEXITCODE -ne 0) { throw "fsutil devdrv query failed with exit code $LASTEXITCODE" }
 
