@@ -237,8 +237,10 @@ pub(crate) fn finish_read(_file: &File) -> io::Result<()> {
 /// Deletes `name` itself, a reparse point included, with POSIX semantics (the name
 /// goes away at once) and ignoring the read-only attribute (spec 5.9 rule 3). On a
 /// filesystem without POSIX deletes it clears read-only and uses the classic
-/// disposition. `is_dir` is not needed: the handle knows what it is.
-pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, _is_dir: bool) -> Result<(), Error> {
+/// disposition. As on Unix, `is_dir` must match the entry: `true` for a real
+/// directory, `false` for a file, a symlink or a junction (a link is removed
+/// itself).
+pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> Result<(), Error> {
     check_name(name)?;
     let handle = nt::open(
         parent,
@@ -247,6 +249,15 @@ pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, _is_dir: bool) -> Result<(),
         0,
     )
     .map_err(in_use_or)?;
+    let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle.as_handle(), FileAttributeTagInfo)?;
+    let real_dir = kind(tag.FileAttributes, tag.ReparseTag) == FileKind::Dir;
+    if is_dir != real_dir {
+        return Err(if is_dir {
+            Error::NotADirectory
+        } else {
+            io::Error::from(io::ErrorKind::IsADirectory).into()
+        });
+    }
     let posix = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_FLAG_DELETE
             | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS
@@ -1037,6 +1048,25 @@ mod tests {
         drop(dir);
         nofollow::remove_tree(&root, name("doomed")).unwrap();
         assert!(!doomed.exists());
+    }
+
+    #[test]
+    fn unlink_at_checks_is_dir() {
+        let (outside, tmp, root) = setup();
+        assert!(matches!(
+            unlink_at(&root, name("file"), true),
+            Err(Error::NotADirectory)
+        ));
+        assert!(matches!(
+            unlink_at(&root, name("sub"), false),
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::IsADirectory
+        ));
+        // A junction is removed as a link, and its target stays.
+        assert!(unlink_at(&root, name("junction"), true).is_err());
+        unlink_at(&root, name("junction"), false).unwrap();
+        assert!(outside.path().join("sentinel").exists());
+        unlink_at(&root, name("file"), false).unwrap();
+        assert!(tmp.path().join("sub").exists());
     }
 
     #[test]
