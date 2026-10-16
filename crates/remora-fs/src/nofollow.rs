@@ -75,22 +75,20 @@ pub fn stat_at(parent: &Dir, name: &OsStr) -> Result<Metadata, Error> {
 }
 
 /// The raw target of the symlink `name`, at most [`MAX_LINK_TARGET`] bytes.
+/// A longer target is `InvalidData`; it is never read in full.
 pub fn read_link_at(parent: &Dir, name: &OsStr) -> Result<Vec<u8>, Error> {
-    let target = at::read_link_at(parent, name)?;
-    if target.len() > MAX_LINK_TARGET {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("symlink target longer than {MAX_LINK_TARGET} bytes"),
-        )
-        .into());
-    }
-    Ok(target)
+    Ok(at::read_link_at(parent, name, MAX_LINK_TARGET)?)
 }
 
 /// Opens the regular file `name` for reading, if it is still the file `expected`
 /// describes: a regular file with the same `dev` and `ino`. Anything else, a FIFO
-/// included, is `Changed`; a symlink is `IsSymlink`. Never blocks on the open.
+/// included, is `Changed`; a symlink is `IsSymlink`. Never blocks on the open, and
+/// never opens a name that `expected` does not describe as a regular file, since
+/// opening a device can have effects of its own.
 pub fn open_file_read(parent: &Dir, name: &OsStr, expected: &Metadata) -> Result<File, Error> {
+    if expected.kind != FileKind::File {
+        return Err(Error::Changed);
+    }
     let file = match at::open_read_nonblocking(parent, name) {
         Ok(file) => file,
         Err(e) if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) => {
@@ -371,6 +369,17 @@ mod tests {
         assert_eq!(expected.kind, FileKind::Other);
         assert!(matches!(
             open_file_read(&root, name("fifo"), &expected),
+            Err(Error::Changed)
+        ));
+        // A FIFO swapped in after the walk saw a regular file is opened, without
+        // blocking, and refused.
+        std::fs::write(tmp.path().join("file"), b"x").unwrap();
+        let expected = stat_at(&root, name("file")).unwrap();
+        std::fs::remove_file(tmp.path().join("file")).unwrap();
+        let mode = rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR;
+        rustix::fs::mkfifoat(&root, "file", mode).unwrap();
+        assert!(matches!(
+            open_file_read(&root, name("file"), &expected),
             Err(Error::Changed)
         ));
     }

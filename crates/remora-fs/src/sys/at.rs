@@ -55,10 +55,20 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
     Ok(out)
 }
 
-/// `readlinkat(parent, name)`: the raw target bytes.
-pub(crate) fn read_link_at(parent: &Dir, name: &OsStr) -> io::Result<Vec<u8>> {
+/// `readlinkat(parent, name)` into a buffer of `max + 1` bytes: the raw target, or
+/// `InvalidData` when it is longer than `max`.
+pub(crate) fn read_link_at(parent: &Dir, name: &OsStr, max: usize) -> io::Result<Vec<u8>> {
     check_name(name)?;
-    Ok(rustix::fs::readlinkat(parent, name, Vec::new())?.into_bytes())
+    let mut buf = vec![0; max + 1];
+    let len = rustix::fs::readlinkat_raw(parent, name, &mut buf[..])?;
+    if len > max {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("symlink target longer than {max} bytes"),
+        ));
+    }
+    buf.truncate(len);
+    Ok(buf)
 }
 
 /// `openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`. The
@@ -219,7 +229,9 @@ mod tests {
     #[test]
     fn read_link_at_returns_target() {
         let (_tmp, dir) = setup();
-        assert_eq!(read_link_at(&dir, name("link")).unwrap(), b"file");
+        assert_eq!(read_link_at(&dir, name("link"), 4).unwrap(), b"file");
+        let err = read_link_at(&dir, name("link"), 3).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
     }
 
     #[test]
