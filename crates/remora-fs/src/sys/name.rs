@@ -23,14 +23,17 @@ fn is_bad_on_windows(b: u8) -> bool {
     b < 0x20 || b"\\<>:\"|?*".contains(&b)
 }
 
-/// `CON`, `PRN`, `AUX`, `NUL`, `COM1`-`COM9` and `LPT1`-`LPT9`, in any case and with
-/// any extension.
+/// `CON`, `PRN`, `AUX`, `NUL`, and `COM` or `LPT` followed by a digit `0`-`9` or a
+/// superscript `¹`, `²` or `³`, in any case, with any extension and with spaces
+/// before the extension.
 fn is_device(bytes: &[u8]) -> bool {
     let stem = bytes.split(|&b| b == b'.').next().unwrap_or(bytes);
-    let stem = stem.to_ascii_uppercase();
+    let stem = stem.trim_ascii_end().to_ascii_uppercase();
     match stem.as_slice() {
         b"CON" | b"PRN" | b"AUX" | b"NUL" => true,
-        [b'C', b'O', b'M', d] | [b'L', b'P', b'T', d] => (b'1'..=b'9').contains(d),
+        [b'C', b'O', b'M', rest @ ..] | [b'L', b'P', b'T', rest @ ..] => {
+            matches!(rest, [b'0'..=b'9'] | [0xC2, 0xB9 | 0xB2 | 0xB3])
+        }
         _ => false,
     }
 }
@@ -64,7 +67,19 @@ mod tests {
     #[test]
     fn windows_rules_apply_only_on_windows() {
         for name in [
-            "a\\b", "a:b", "a*", "trail.", "trail ", "CON", "nul.txt", "com1", "LPT9.log",
+            "a\\b",
+            "a:b",
+            "a*",
+            "trail.",
+            "trail ",
+            "CON",
+            "nul.txt",
+            "com1",
+            "LPT9.log",
+            "com0",
+            "COM¹",
+            "lpt³.txt",
+            "NUL .txt",
         ] {
             assert_eq!(
                 check_name(OsStr::new(name)).is_err(),
@@ -72,8 +87,26 @@ mod tests {
                 "{name:?}"
             );
         }
-        for name in ["CONSOLE", "com0", "lpt10"] {
+        for name in ["CONSOLE", "com10", "lpt", "COM´"] {
             check_name(OsStr::new(name)).unwrap();
+        }
+    }
+
+    #[test]
+    fn device_names() {
+        for name in [
+            "CON",
+            "nul.txt",
+            "com0",
+            "LPT9.log",
+            "COM\u{b9}",
+            "lpt\u{b3}.txt",
+            "NUL .txt",
+        ] {
+            assert!(is_device(name.as_bytes()), "{name:?}");
+        }
+        for name in ["CONSOLE", "com10", "lpt", "COM\u{b4}", "xcom1"] {
+            assert!(!is_device(name.as_bytes()), "{name:?}");
         }
     }
 }
