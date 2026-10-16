@@ -486,10 +486,13 @@ fn reparse_data(handle: BorrowedHandle<'_>) -> io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-/// Whether mount-point reparse data names a volume rather than a directory.
+/// Whether reparse data is a mount point that names a volume rather than a
+/// directory. A symbolic link to a volume path is still a link.
 fn is_volume_mount(buf: &[u8]) -> bool {
+    let tag = buf.first_chunk::<4>().map(|b| u32::from_le_bytes(*b));
     let prefix: Vec<u16> = r"\??\Volume{".encode_utf16().collect();
-    substitute_name(buf).is_ok_and(|name| name.starts_with(&prefix))
+    tag == Some(IO_REPARSE_TAG_MOUNT_POINT)
+        && substitute_name(buf).is_ok_and(|name| name.starts_with(&prefix))
 }
 
 fn kind(attributes: u32, tag: u32) -> FileKind {
@@ -1106,6 +1109,33 @@ mod tests {
         assert!(parse_link(&symlink).is_err());
         assert!(parse_link(&symlink[..10]).is_err());
         assert!(parse_link(&[]).is_err());
+    }
+
+    #[test]
+    fn only_a_mount_point_tag_names_a_volume_mount() {
+        let data = |tag: u32| {
+            let target: Vec<u8> = r"\??\Volume{0}\"
+                .encode_utf16()
+                .flat_map(u16::to_le_bytes)
+                .collect();
+            let len = u16::try_from(target.len()).unwrap();
+            let mut buf = Vec::new();
+            buf.extend_from_slice(&tag.to_le_bytes());
+            buf.extend_from_slice(&[0; 4]);
+            // Substitute name first, empty print name after it.
+            for v in [0, len, len, 0] {
+                buf.extend_from_slice(&v.to_le_bytes());
+            }
+            if tag == IO_REPARSE_TAG_SYMLINK {
+                buf.extend_from_slice(&[0; 4]);
+            }
+            buf.extend_from_slice(&target);
+            buf
+        };
+        assert!(is_volume_mount(&data(IO_REPARSE_TAG_MOUNT_POINT)));
+        let symlink = data(IO_REPARSE_TAG_SYMLINK);
+        assert!(!is_volume_mount(&symlink));
+        assert!(parse_link(&symlink).is_ok());
     }
 
     #[test]
