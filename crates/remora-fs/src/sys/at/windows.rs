@@ -802,16 +802,11 @@ mod tests {
             let entry_name = std::str::from_utf8(&entry.name).unwrap();
             let meta = stat_at(&root, name(entry_name)).unwrap();
             assert_eq!(entry.kind_hint, Some(meta.kind), "{entry_name}");
+            // Identity, type and size; the listing's times can lag a later query.
             let listed = entry.metadata.unwrap();
             assert_eq!(
-                (
-                    listed.kind,
-                    listed.size,
-                    listed.dev,
-                    listed.ino,
-                    listed.modified
-                ),
-                (meta.kind, meta.size, meta.dev, meta.ino, meta.modified),
+                (listed.kind, listed.size, listed.dev, listed.ino),
+                (meta.kind, meta.size, meta.dev, meta.ino),
                 "{entry_name}"
             );
             assert_ne!(meta.ino, 0);
