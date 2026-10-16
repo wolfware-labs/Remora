@@ -6,7 +6,7 @@ use windows_sys::Win32::Foundation::{ERROR_INSUFFICIENT_BUFFER, GetLastError};
 use windows_sys::Win32::Security::{
     ACCESS_ALLOWED_ACE, ACL, ACL_REVISION, AddAccessAllowedAceEx, CONTAINER_INHERIT_ACE, CopySid,
     CreateWellKnownSid, GetLengthSid, GetTokenInformation, InitializeAcl,
-    InitializeSecurityDescriptor, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
+    InitializeSecurityDescriptor, IsValidSid, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID,
     SE_DACL_PROTECTED, SECURITY_DESCRIPTOR, SECURITY_MAX_SID_SIZE, SetSecurityDescriptorControl,
     SetSecurityDescriptorDacl, SetSecurityDescriptorOwner, TOKEN_QUERY, TOKEN_USER, TokenUser,
     WinLocalSystemSid,
@@ -66,7 +66,11 @@ impl Sid {
     }
 
     fn copy(sid: PSID) -> io::Result<Self> {
-        // SAFETY: `sid` points to a valid SID owned by the caller's live buffer.
+        // SAFETY: `sid` points into the caller's live buffer; IsValidSid only reads it.
+        if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+            return Err(io::Error::other("the token holds no valid user SID"));
+        }
+        // SAFETY: `sid` was checked to be a valid SID above.
         let len = unsafe { GetLengthSid(sid) };
         let mut buf = vec![0u32; (len as usize).div_ceil(4)];
         // SAFETY: `buf` holds `len` writable bytes and `sid` is valid.

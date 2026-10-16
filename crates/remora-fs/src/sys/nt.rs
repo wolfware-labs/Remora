@@ -12,7 +12,9 @@ use windows_sys::Wdk::Storage::FileSystem::{
     FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT,
     FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
 };
-use windows_sys::Win32::Foundation::{OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING};
+use windows_sys::Win32::Foundation::{
+    OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, STATUS_FILE_IS_A_DIRECTORY, UNICODE_STRING,
+};
 use windows_sys::Win32::Storage::FileSystem::{
     DELETE, FILE_ATTRIBUTE_NORMAL, FILE_GENERIC_READ, FILE_GENERIC_WRITE, FILE_SHARE_DELETE,
     FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
@@ -78,6 +80,11 @@ pub(crate) fn create(
             0,
         )
     };
+    // A file over an existing directory is refused as a directory, not as a name
+    // collision; with FILE_CREATE either way the name exists.
+    if status == STATUS_FILE_IS_A_DIRECTORY {
+        return Err(io::ErrorKind::AlreadyExists.into());
+    }
     if status < 0 {
         // SAFETY: a pure conversion of a status code.
         let code = unsafe { RtlNtStatusToDosError(status) };
