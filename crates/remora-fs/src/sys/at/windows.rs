@@ -252,11 +252,13 @@ pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> Result<(), 
     let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle.as_handle(), FileAttributeTagInfo)?;
     let real_dir = kind(tag.FileAttributes, tag.ReparseTag) == FileKind::Dir;
     if is_dir != real_dir {
-        return Err(if is_dir {
-            Error::NotADirectory
+        // The I/O errors Unix reports for the same mismatch.
+        let kind = if is_dir {
+            io::ErrorKind::NotADirectory
         } else {
-            io::Error::from(io::ErrorKind::IsADirectory).into()
-        });
+            io::ErrorKind::IsADirectory
+        };
+        return Err(io::Error::from(kind).into());
     }
     let posix = FILE_DISPOSITION_INFO_EX {
         Flags: FILE_DISPOSITION_FLAG_DELETE
@@ -1055,7 +1057,7 @@ mod tests {
         let (outside, tmp, root) = setup();
         assert!(matches!(
             unlink_at(&root, name("file"), true),
-            Err(Error::NotADirectory)
+            Err(Error::Io(e)) if e.kind() == io::ErrorKind::NotADirectory
         ));
         assert!(matches!(
             unlink_at(&root, name("sub"), false),
