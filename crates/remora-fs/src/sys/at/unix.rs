@@ -49,11 +49,12 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
         if name == b"." || name == b".." {
             continue;
         }
-        out.push(Entry {
-            name: name.to_vec(),
-            kind_hint: kind_hint(entry.file_type()),
-            metadata: None,
-        });
+        let name = std::os::unix::ffi::OsStrExt::from_bytes(name);
+        out.push(Entry::new(
+            OsStr::to_owned(name),
+            kind_hint(entry.file_type()),
+            None,
+        ));
     }
     Ok(out)
 }

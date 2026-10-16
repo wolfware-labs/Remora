@@ -5,7 +5,7 @@
 
 use crate::Error;
 use crate::sys::{Dir, at, name_from_bytes};
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 
 /// The longest symlink target Remora reads (spec 7.11).
@@ -60,6 +60,29 @@ pub struct Entry {
     /// `FileIdExtdDirectoryInfo`, so a walk needs no open per entry; `None` on Unix,
     /// where a listing holds only the name and the type.
     pub metadata: Option<Metadata>,
+    /// The same name as an `OsString`, which opens it again even where `name`
+    /// cannot be turned back into one (an unpaired surrogate on Windows).
+    os_name: OsString,
+}
+
+impl Entry {
+    pub(crate) fn new(
+        os_name: OsString,
+        kind_hint: Option<FileKind>,
+        metadata: Option<Metadata>,
+    ) -> Self {
+        Self {
+            name: os_name.as_encoded_bytes().to_vec(),
+            kind_hint,
+            metadata,
+            os_name,
+        }
+    }
+
+    /// The name to pass back to `stat_at`, `open_dir` and the other calls.
+    pub fn os_name(&self) -> &OsStr {
+        &self.os_name
+    }
 }
 
 /// Opens the subdirectory `name` of `parent`. A symlink is `IsSymlink`, anything
@@ -169,42 +192,41 @@ pub fn remove_tree(parent: &Dir, name: &OsStr) -> Result<(), Error> {
     // subdirectories still to remove. Every directory is listed once; the stack
     // keeps a deep tree from exhausting the thread stack.
     let pending = clear_files(&top)?;
-    let mut stack: Vec<Level> = vec![(top, name.as_encoded_bytes().to_vec(), pending)];
+    let mut stack: Vec<Level> = vec![(top, name.to_owned(), pending)];
     while let Some((dir, _, pending)) = stack.last_mut() {
         match pending.pop() {
-            Some(child) => match open_dir(dir, name_from_bytes(&child)?) {
+            Some(child) => match open_dir(dir, &child) {
                 Ok(child_dir) => {
                     let below = clear_files(&child_dir)?;
                     stack.push((child_dir, child, below));
                 }
                 // Replaced by a link or a file since the listing: remove it as one.
                 Err(Error::IsSymlink | Error::NotADirectory) => {
-                    unlink_at(dir, name_from_bytes(&child)?, false)?;
+                    unlink_at(dir, &child, false)?;
                 }
                 Err(e) => return Err(e),
             },
             None => {
                 let (_, done, _) = stack.pop().ok_or(Error::NotADirectory)?;
                 let above = stack.last().map_or(parent, |(dir, _, _)| dir);
-                unlink_at(above, name_from_bytes(&done)?, true)?;
+                unlink_at(above, &done, true)?;
             }
         }
     }
     Ok(())
 }
 
-type Level = (Dir, Vec<u8>, Vec<Vec<u8>>);
+type Level = (Dir, OsString, Vec<OsString>);
 
 /// Unlinks every entry of `dir` that is not a real directory and returns the names
 /// of the subdirectories.
-fn clear_files(dir: &Dir) -> Result<Vec<Vec<u8>>, Error> {
+fn clear_files(dir: &Dir) -> Result<Vec<OsString>, Error> {
     let mut subdirs = Vec::new();
     for entry in at::entries(dir)? {
-        let child = name_from_bytes(&entry.name)?;
-        if at::stat_at(dir, child)?.kind == FileKind::Dir {
-            subdirs.push(entry.name);
+        if at::stat_at(dir, entry.os_name())?.kind == FileKind::Dir {
+            subdirs.push(entry.os_name);
         } else {
-            unlink_at(dir, child, false)?;
+            unlink_at(dir, entry.os_name(), false)?;
         }
     }
     Ok(subdirs)

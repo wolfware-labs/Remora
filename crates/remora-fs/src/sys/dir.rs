@@ -14,6 +14,10 @@ pub struct Dir {
     fd: std::os::fd::OwnedFd,
     #[cfg(windows)]
     handle: std::os::windows::io::OwnedHandle,
+    /// A Windows listing keeps its position in the file object, which a duplicated
+    /// handle shares; one lock per file object keeps two listings apart.
+    #[cfg(windows)]
+    listing: std::sync::Arc<std::sync::Mutex<()>>,
 }
 
 impl Dir {
@@ -36,6 +40,7 @@ impl Dir {
         #[cfg(windows)]
         return Ok(Self {
             handle: self.handle.try_clone()?,
+            listing: std::sync::Arc::clone(&self.listing),
         });
     }
 
@@ -46,7 +51,18 @@ impl Dir {
 
     #[cfg(windows)]
     pub(super) fn from_handle(handle: std::os::windows::io::OwnedHandle) -> Self {
-        Self { handle }
+        Self {
+            handle,
+            listing: std::sync::Arc::default(),
+        }
+    }
+
+    /// Held while a listing reads through this handle.
+    #[cfg(windows)]
+    pub(super) fn lock_listing(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.listing
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -109,9 +125,7 @@ mod imp {
         if attributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
             return Err(io::ErrorKind::NotADirectory.into());
         }
-        Ok(Dir {
-            handle: file.into(),
-        })
+        Ok(Dir::from_handle(file.into()))
     }
 }
 

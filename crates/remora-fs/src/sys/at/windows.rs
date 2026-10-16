@@ -90,8 +90,10 @@ pub(crate) fn fstat(file: &File) -> io::Result<Metadata> {
 /// The entries of `dir` except `.` and `..`, each with the metadata of its
 /// listing record (spec 7.4 rule 8), so a walk needs no open per entry. The
 /// listing starts with the restart class, so it always reads from the first
-/// entry; two threads must not list the same `Dir` at once.
+/// entry, and holds the `Dir`'s listing lock, since the position lives in the
+/// handle's file object.
 pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
+    let _listing_lock = dir.lock_listing();
     let listing = dir.as_handle();
     // The records carry no volume serial: every entry shares the directory's.
     let volume: FILE_ID_INFO = query(listing, FileIdInfo)?;
@@ -146,11 +148,11 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
                 )
             };
             if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-                out.push(Entry {
-                    name: OsString::from_wide(&name).into_encoded_bytes(),
-                    kind_hint: Some(meta.kind),
-                    metadata: Some(meta),
-                });
+                out.push(Entry::new(
+                    OsString::from_wide(&name),
+                    Some(meta.kind),
+                    Some(meta),
+                ));
             }
             if next == 0 {
                 break;
@@ -1012,6 +1014,29 @@ mod tests {
         assert!(parse_link(&symlink).is_err());
         assert!(parse_link(&symlink[..10]).is_err());
         assert!(parse_link(&[]).is_err());
+    }
+
+    #[test]
+    fn unpaired_surrogate_names_are_listed_and_removed() {
+        let (_outside, tmp, root) = setup();
+        let odd = OsString::from_wide(&[u16::from(b'x'), 0xD800]);
+        tmp.mkdir_all("doomed");
+        let doomed = tmp.path().join("doomed");
+        std::fs::create_dir(doomed.join(&odd)).unwrap();
+        std::fs::write(doomed.join(&odd).join(&odd), b"x").unwrap();
+        let dir = open_dir(&root, name("doomed")).unwrap();
+        let listed = entries(&dir).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].os_name(), odd.as_os_str());
+        // The key form refuses it, the entry's own name opens it.
+        assert!(crate::sys::name_from_bytes(&listed[0].name).is_err());
+        assert_eq!(
+            stat_at(&dir, listed[0].os_name()).unwrap().kind,
+            FileKind::Dir
+        );
+        drop(dir);
+        nofollow::remove_tree(&root, name("doomed")).unwrap();
+        assert!(!doomed.exists());
     }
 
     #[test]
