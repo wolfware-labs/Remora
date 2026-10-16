@@ -37,9 +37,12 @@ pub fn create_private_file(parent: &Dir, name: &OsStr) -> io::Result<File> {
 /// directory, not a symlink.
 pub fn create_dir_all_private(path: &Path) -> io::Result<Dir> {
     if !path.is_absolute()
-        || path
-            .components()
-            .any(|c| matches!(c, Component::CurDir | Component::ParentDir))
+        || path.components().any(|c| {
+            // A verbatim (`\\?\`) Windows path keeps `.` and `..` as plain names.
+            matches!(c, Component::CurDir | Component::ParentDir)
+                || c.as_os_str() == "."
+                || c.as_os_str() == ".."
+        })
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -69,7 +72,8 @@ pub fn create_dir_all_private(path: &Path) -> io::Result<Dir> {
     for name in missing.into_iter().rev() {
         current.push(name);
         dir = match create_dir_private(&dir, name) {
-            // Another process created it in between: open what is there.
+            // Another process created it in between: open what is there. By path, as
+            // the existing ancestors above are; #9 adds the parent-relative open.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Dir::open(&current)?,
             result => result?,
         };
@@ -264,6 +268,17 @@ mod tests {
     fn create_dir_all_private_refuses_relative_and_symlinked_paths() {
         let err = create_dir_all_private(Path::new("relative/path")).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        let tmp = TestDir::new();
+        let dotted = tmp.path().join("a").join("..").join("b");
+        let err = create_dir_all_private(&dotted).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        #[cfg(windows)]
+        {
+            let verbatim = format!(r"\\?\{}\a\..\b", tmp.path().display());
+            let err = create_dir_all_private(Path::new(&verbatim)).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput);
+        }
+        drop(tmp);
         let tmp = TestDir::new();
         let real = tmp.mkdir_all("real");
         #[cfg(unix)]

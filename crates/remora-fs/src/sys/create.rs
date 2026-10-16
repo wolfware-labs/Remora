@@ -82,6 +82,9 @@ mod tests {
     #[test]
     fn creates_a_directory_and_a_writable_file() {
         let tmp = TestDir::new();
+        // These primitives skip the lock that `private` takes; hold it so a
+        // concurrent `with_umask` test cannot narrow the modes.
+        let _lock = crate::private::creation_lock();
         let parent = Dir::open(tmp.path()).unwrap();
         let dir = create_dir(&parent, OsStr::new("d")).unwrap();
         let mut file = create_file(&dir, OsStr::new("f")).unwrap();
@@ -96,6 +99,9 @@ mod tests {
     #[test]
     fn existing_names_and_bad_names_fail() {
         let tmp = TestDir::new();
+        // These primitives skip the lock that `private` takes; hold it so a
+        // concurrent `with_umask` test cannot narrow the modes.
+        let _lock = crate::private::creation_lock();
         let parent = Dir::open(tmp.path()).unwrap();
         create_dir(&parent, OsStr::new("d")).unwrap();
         create_file(&parent, OsStr::new("f")).unwrap();
