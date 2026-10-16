@@ -164,8 +164,8 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
 
 /// The target of the symbolic link or junction `name`, from its reparse data: the
 /// print name, or the substitute name without its `\??\` prefix when the print
-/// name is empty. `InvalidData` for another reparse tag, a plain entry, or a target
-/// longer than `max` bytes (in WTF-8).
+/// name is empty. `InvalidData` for another reparse tag, a volume mount point, a
+/// plain entry, or a target longer than `max` bytes (in WTF-8).
 pub(crate) fn read_link_at(parent: &Dir, name: &OsStr, max: usize) -> io::Result<Vec<u8>> {
     check_name(name)?;
     let handle = nt::open(parent, name, FILE_READ_ATTRIBUTES, 0)?;

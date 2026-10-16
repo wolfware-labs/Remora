@@ -18,8 +18,9 @@ pub enum FileKind {
     Symlink,
     /// A FIFO, socket or device (Unix).
     Other,
-    /// A Windows reparse point whose tag is neither a symbolic link nor a junction
-    /// (cloud placeholders, deduplicated files), with that tag.
+    /// A Windows reparse point that is neither a symbolic link nor a junction,
+    /// with its tag: cloud placeholders, deduplicated files, and volume mount
+    /// points, which carry the junction tag but name a volume.
     ReparsePoint(u32),
 }
 
