@@ -249,7 +249,7 @@ pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> Result<(), 
     match set_info(handle.as_handle(), FileDispositionInfoEx, &posix) {
         Ok(()) => Ok(()),
         Err(e) if is_unsupported(&e) => {
-            clear_read_only_on(handle.as_handle())?;
+            clear_read_only_on(handle.as_handle()).map_err(in_use_or)?;
             let classic = FILE_DISPOSITION_INFO { DeleteFile: true };
             set_info(handle.as_handle(), FileDispositionInfo, &classic).map_err(in_use_or)
         }
@@ -338,7 +338,7 @@ fn rename(
 /// a missing name is not an error.
 fn clear_read_only(dir: &Dir, name: &OsStr) -> Result<bool, Error> {
     match nt::open(dir, name, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, 0) {
-        Ok(handle) => Ok(clear_read_only_on(handle.as_handle())?),
+        Ok(handle) => clear_read_only_on(handle.as_handle()).map_err(in_use_or),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(in_use_or(e)),
     }
