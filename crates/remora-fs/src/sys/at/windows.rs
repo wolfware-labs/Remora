@@ -55,17 +55,11 @@ pub(crate) fn open_dir(parent: &Dir, name: &OsStr) -> Result<Dir, Error> {
         FILE_GENERIC_READ | FILE_TRAVERSE,
         FILE_DIRECTORY_FILE,
     ) {
-        Ok(handle) => {
-            let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle.as_handle(), FileAttributeTagInfo)?;
-            if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-                return Err(if is_link_tag(tag.ReparseTag) {
-                    Error::IsSymlink
-                } else {
-                    Error::NotADirectory
-                });
-            }
-            Ok(Dir::from_handle(handle))
-        }
+        Ok(handle) => match handle_kind(handle.as_handle())? {
+            FileKind::Dir => Ok(Dir::from_handle(handle)),
+            FileKind::Symlink => Err(Error::IsSymlink),
+            _ => Err(Error::NotADirectory),
+        },
         // A file symlink has no directory attribute; ask the entry.
         Err(e) if e.kind() == io::ErrorKind::NotADirectory => match stat_at(parent, name)?.kind {
             FileKind::Symlink => Err(Error::IsSymlink),
@@ -148,11 +142,17 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
                 )
             };
             if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
-                out.push(Entry::new(
-                    OsString::from_wide(&name),
-                    Some(meta.kind),
-                    Some(meta),
-                ));
+                let os_name = OsString::from_wide(&name);
+                let mut meta = meta;
+                // A mount-point tag is a junction or a volume mount point; only
+                // the reparse data tells them apart.
+                if meta.kind == FileKind::Symlink
+                    && let Ok(child) = nt::open(dir, &os_name, FILE_READ_ATTRIBUTES, 0)
+                    && let Ok(kind) = handle_kind(child.as_handle())
+                {
+                    meta.kind = kind;
+                }
+                out.push(Entry::new(os_name, Some(meta.kind), Some(meta)));
             }
             if next == 0 {
                 break;
@@ -169,28 +169,14 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
 pub(crate) fn read_link_at(parent: &Dir, name: &OsStr, max: usize) -> io::Result<Vec<u8>> {
     check_name(name)?;
     let handle = nt::open(parent, name, FILE_READ_ATTRIBUTES, 0)?;
-    let mut buf = vec![0u8; REPARSE_BUFFER];
-    let mut returned = 0u32;
-    // SAFETY: `buf` holds REPARSE_BUFFER writable bytes; no input buffer.
-    let ok = unsafe {
-        DeviceIoControl(
-            handle.as_raw_handle(),
-            FSCTL_GET_REPARSE_POINT,
-            std::ptr::null(),
-            0,
-            buf.as_mut_ptr().cast(),
-            REPARSE_BUFFER as u32,
-            &mut returned,
-            std::ptr::null_mut(),
-        )
-    };
-    if ok == 0 {
+    let buf = reparse_data(handle.as_handle())
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, format!("not a link: {e}")))?;
+    if is_volume_mount(&buf) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("not a link: {}", io::Error::last_os_error()),
+            "a volume mount point is not a link",
         ));
     }
-    buf.truncate(returned as usize);
     let target = parse_link(&buf)?;
     let bytes = OsString::from_wide(&target).into_encoded_bytes();
     if bytes.len() > max {
@@ -218,15 +204,11 @@ pub(crate) fn open_read(parent: &Dir, name: &OsStr) -> Result<File, Error> {
         }
         Err(e) => return Err(e.into()),
     };
-    let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle.as_handle(), FileAttributeTagInfo)?;
-    if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(if is_link_tag(tag.ReparseTag) {
-            Error::IsSymlink
-        } else {
-            Error::Changed
-        });
+    match handle_kind(handle.as_handle())? {
+        FileKind::File => Ok(File::from(handle)),
+        FileKind::Symlink => Err(Error::IsSymlink),
+        _ => Err(Error::Changed),
     }
-    Ok(File::from(handle))
 }
 
 /// Nothing to undo on Windows: the open in [`open_read`] does not block.
@@ -249,8 +231,7 @@ pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> Result<(), 
         0,
     )
     .map_err(in_use_or)?;
-    let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle.as_handle(), FileAttributeTagInfo)?;
-    let real_dir = kind(tag.FileAttributes, tag.ReparseTag) == FileKind::Dir;
+    let real_dir = handle_kind(handle.as_handle())? == FileKind::Dir;
     if is_dir != real_dir {
         // The I/O errors Unix reports for the same mismatch.
         let kind = if is_dir {
@@ -454,9 +435,8 @@ fn metadata(handle: BorrowedHandle<'_>) -> io::Result<Metadata> {
     let id: FILE_ID_INFO = query(handle, FileIdInfo)?;
     let basic: FILE_BASIC_INFO = query(handle, FileBasicInfo)?;
     let standard: FILE_STANDARD_INFO = query(handle, FileStandardInfo)?;
-    let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle, FileAttributeTagInfo)?;
     Ok(Metadata {
-        kind: kind(tag.FileAttributes, tag.ReparseTag),
+        kind: handle_kind(handle)?,
         mode: basic.FileAttributes,
         size: u64::try_from(standard.EndOfFile).unwrap_or(0),
         modified: from_filetime(basic.LastWriteTime),
@@ -464,6 +444,52 @@ fn metadata(handle: BorrowedHandle<'_>) -> io::Result<Metadata> {
         dev: id.VolumeSerialNumber,
         ino: u128::from_le_bytes(id.FileId.Identifier),
     })
+}
+
+/// The kind of the entry an open handle refers to. A mount-point tag is a
+/// junction, which counts as a symlink, unless its reparse data names a volume
+/// (`\??\Volume{...}`): a volume mount point is another filesystem, reported as
+/// `ReparsePoint`.
+fn handle_kind(handle: BorrowedHandle<'_>) -> io::Result<FileKind> {
+    let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle, FileAttributeTagInfo)?;
+    let kind = kind(tag.FileAttributes, tag.ReparseTag);
+    if kind == FileKind::Symlink
+        && tag.ReparseTag == IO_REPARSE_TAG_MOUNT_POINT
+        && is_volume_mount(&reparse_data(handle)?)
+    {
+        return Ok(FileKind::ReparsePoint(IO_REPARSE_TAG_MOUNT_POINT));
+    }
+    Ok(kind)
+}
+
+/// The reparse data of the reparse point an open handle refers to.
+fn reparse_data(handle: BorrowedHandle<'_>) -> io::Result<Vec<u8>> {
+    let mut buf = vec![0u8; REPARSE_BUFFER];
+    let mut returned = 0u32;
+    // SAFETY: `buf` holds REPARSE_BUFFER writable bytes; no input buffer.
+    let ok = unsafe {
+        DeviceIoControl(
+            handle.as_raw_handle(),
+            FSCTL_GET_REPARSE_POINT,
+            std::ptr::null(),
+            0,
+            buf.as_mut_ptr().cast(),
+            REPARSE_BUFFER as u32,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buf.truncate(returned as usize);
+    Ok(buf)
+}
+
+/// Whether mount-point reparse data names a volume rather than a directory.
+fn is_volume_mount(buf: &[u8]) -> bool {
+    let prefix: Vec<u16> = r"\??\Volume{".encode_utf16().collect();
+    substitute_name(buf).is_ok_and(|name| name.starts_with(&prefix))
 }
 
 fn kind(attributes: u32, tag: u32) -> FileKind {
@@ -485,8 +511,9 @@ fn is_link_tag(tag: u32) -> bool {
     tag == IO_REPARSE_TAG_SYMLINK || tag == IO_REPARSE_TAG_MOUNT_POINT
 }
 
-/// Decodes `REPARSE_DATA_BUFFER` for a symbolic link or a mount point.
-fn parse_link(buf: &[u8]) -> io::Result<Vec<u16>> {
+/// Decodes the substitute and print names of `REPARSE_DATA_BUFFER` for a
+/// symbolic link or a mount point.
+fn link_names(buf: &[u8]) -> io::Result<(Vec<u16>, Vec<u16>)> {
     let invalid = || io::Error::new(io::ErrorKind::InvalidData, "malformed reparse data");
     let u16_at = |at: usize| -> io::Result<usize> {
         let bytes = buf.get(at..at + 2).ok_or_else(invalid)?;
@@ -518,15 +545,27 @@ fn parse_link(buf: &[u8]) -> io::Result<Vec<u16>> {
             .map(|c| u16::from_le_bytes(*c))
             .collect())
     };
-    let print = name(u16_at(12)?, u16_at(14)?)?;
+    Ok((
+        name(u16_at(8)?, u16_at(10)?)?,
+        name(u16_at(12)?, u16_at(14)?)?,
+    ))
+}
+
+/// The target a link's reparse data names: the print name, or the substitute
+/// name without its `\??\` prefix when the print name is empty.
+fn parse_link(buf: &[u8]) -> io::Result<Vec<u16>> {
+    let (substitute, print) = link_names(buf)?;
     if !print.is_empty() {
         return Ok(print);
     }
-    let substitute = name(u16_at(8)?, u16_at(10)?)?;
     let prefix: Vec<u16> = r"\??\".encode_utf16().collect();
     Ok(substitute
         .strip_prefix(prefix.as_slice())
         .map_or(substitute.clone(), <[u16]>::to_vec))
+}
+
+fn substitute_name(buf: &[u8]) -> io::Result<Vec<u16>> {
+    Ok(link_names(buf)?.0)
 }
 
 /// Reads one information class into a value of the type that class fills.
@@ -646,6 +685,46 @@ pub(crate) mod test_support {
         set_reparse(link, IO_REPARSE_TAG_MOUNT_POINT, &[], &data, true)
     }
 
+    /// Mounts the volume holding `on` at the new directory `at`; the mount goes
+    /// away when the guard drops, so a failing test leaves no volume mounted.
+    pub(crate) fn mount_volume(at: &Path, on: &Path) -> io::Result<VolumeMount> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetVolumeNameForVolumeMountPointW, GetVolumePathNameW, SetVolumeMountPointW,
+        };
+        std::fs::create_dir(at)?;
+        let wide = |p: &Path| -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() };
+        let mut root = vec![0u16; 1024];
+        // SAFETY: `on` is NUL-terminated and `root` holds 1024 writable characters.
+        if unsafe { GetVolumePathNameW(wide(on).as_ptr(), root.as_mut_ptr(), 1024) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let mut volume = vec![0u16; 64];
+        // SAFETY: `root` is NUL-terminated and `volume` holds 64 writable characters.
+        if unsafe { GetVolumeNameForVolumeMountPointW(root.as_ptr(), volume.as_mut_ptr(), 64) } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        // The mount point is a directory path with a trailing backslash.
+        let mut point: Vec<u16> = at.as_os_str().encode_wide().collect();
+        point.extend_from_slice(&[92, 0]);
+        // SAFETY: both strings are NUL-terminated and outlive the call.
+        if unsafe { SetVolumeMountPointW(point.as_ptr(), volume.as_ptr()) } == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(VolumeMount(point))
+    }
+
+    pub(crate) struct VolumeMount(Vec<u16>);
+
+    impl Drop for VolumeMount {
+        fn drop(&mut self) {
+            // SAFETY: the stored mount point is NUL-terminated.
+            unsafe {
+                windows_sys::Win32::Storage::FileSystem::DeleteVolumeMountPointW(self.0.as_ptr())
+            };
+        }
+    }
+
     /// Puts a reparse point with [`TEST_TAG`] on the existing file `path`.
     pub(crate) fn other_tag(path: &Path) -> io::Result<()> {
         // Tags outside Microsoft's range carry a GUID before their data.
@@ -692,7 +771,7 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod tests {
-    use super::test_support::{TEST_TAG, junction, other_tag};
+    use super::test_support::{TEST_TAG, junction, mount_volume, other_tag};
     use super::*;
     use crate::nofollow;
     use crate::sys::test_dir::TestDir;
@@ -1069,6 +1148,29 @@ mod tests {
         assert!(outside.path().join("sentinel").exists());
         unlink_at(&root, name("file"), false).unwrap();
         assert!(tmp.path().join("sub").exists());
+    }
+
+    #[test]
+    fn volume_mount_point_is_not_a_link() {
+        let (_outside, tmp, root) = setup();
+        let at = tmp.path().join("volume");
+        let mount = mount_volume(&at, tmp.path()).unwrap();
+        let tag = FileKind::ReparsePoint(IO_REPARSE_TAG_MOUNT_POINT);
+        assert_eq!(stat_at(&root, name("volume")).unwrap().kind, tag);
+        let listed = entries(&root).unwrap();
+        let entry = listed.iter().find(|e| e.os_name() == "volume").unwrap();
+        assert_eq!(entry.kind_hint, Some(tag));
+        assert!(matches!(
+            open_dir(&root, name("volume")),
+            Err(Error::NotADirectory)
+        ));
+        assert!(read_link_at(&root, name("volume"), 4096).is_err());
+        // The junction next to it is still a link.
+        assert_eq!(
+            stat_at(&root, name("junction")).unwrap().kind,
+            FileKind::Symlink
+        );
+        drop(mount);
     }
 
     #[test]
