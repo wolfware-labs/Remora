@@ -14,6 +14,8 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("remora-fs supports Linux, macOS and Windows only");
 
+#[cfg(unix)]
+pub(crate) mod at;
 mod create;
 mod dir;
 mod name;
