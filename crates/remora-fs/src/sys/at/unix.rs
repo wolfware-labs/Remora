@@ -52,6 +52,7 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
         out.push(Entry {
             name: name.to_vec(),
             kind_hint: kind_hint(entry.file_type()),
+            metadata: None,
         });
     }
     Ok(out)

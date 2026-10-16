@@ -49,13 +49,17 @@ pub struct Metadata {
     pub ino: u128,
 }
 
-/// One directory entry. The kind is a hint from the listing and can be stale or
-/// missing; `stat_at` is authoritative.
+/// One directory entry. The kind and metadata come from the listing and can be
+/// stale or missing; `stat_at` is authoritative.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     /// The raw name; nothing here requires UTF-8. On Windows the name in WTF-8.
     pub name: Vec<u8>,
     pub kind_hint: Option<FileKind>,
+    /// The metadata in the listing record: on Windows from
+    /// `FileIdExtdDirectoryInfo`, so a walk needs no open per entry; `None` on Unix,
+    /// where a listing holds only the name and the type.
+    pub metadata: Option<Metadata>,
 }
 
 /// Opens the subdirectory `name` of `parent`. A symlink is `IsSymlink`, anything

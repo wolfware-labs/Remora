@@ -11,11 +11,11 @@ use std::fs::File;
 use std::io;
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::os::windows::io::{AsHandle, AsRawHandle, BorrowedHandle};
-use std::path::PathBuf;
 use windows_sys::Wdk::Storage::FileSystem::{
-    FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_RENAME_IGNORE_READONLY_ATTRIBUTE,
-    FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS, FILE_RENAME_REPLACE_IF_EXISTS,
-    FileRenameInformationEx, NtSetInformationFile,
+    FILE_DIRECTORY_FILE, FILE_INFORMATION_CLASS, FILE_NON_DIRECTORY_FILE,
+    FILE_RENAME_IGNORE_READONLY_ATTRIBUTE, FILE_RENAME_INFORMATION, FILE_RENAME_POSIX_SEMANTICS,
+    FILE_RENAME_REPLACE_IF_EXISTS, FileRenameInformation, FileRenameInformationEx,
+    NtSetInformationFile,
 };
 use windows_sys::Win32::Foundation::{
     ERROR_INVALID_PARAMETER, ERROR_NO_MORE_FILES, ERROR_NOT_SUPPORTED, ERROR_SHARING_VIOLATION,
@@ -30,8 +30,7 @@ use windows_sys::Win32::Storage::FileSystem::{
     FILE_READ_ATTRIBUTES, FILE_STANDARD_INFO, FILE_TRAVERSE, FILE_WRITE_ATTRIBUTES,
     FileAttributeTagInfo, FileBasicInfo, FileDispositionInfo, FileDispositionInfoEx,
     FileIdExtdDirectoryInfo, FileIdExtdDirectoryRestartInfo, FileIdInfo, FileStandardInfo,
-    GetFileInformationByHandleEx, GetFinalPathNameByHandleW, MOVEFILE_REPLACE_EXISTING,
-    MOVEFILE_WRITE_THROUGH, MoveFileExW, SetFileInformationByHandle,
+    GetFileInformationByHandleEx, SetFileInformationByHandle,
 };
 use windows_sys::Win32::System::IO::DeviceIoControl;
 use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
@@ -72,7 +71,7 @@ pub(crate) fn open_dir(parent: &Dir, name: &OsStr) -> Result<Dir, Error> {
             FileKind::Symlink => Err(Error::IsSymlink),
             _ => Err(Error::NotADirectory),
         },
-        Err(e) => Err(in_use_or(e)),
+        Err(e) => Err(e.into()),
     }
 }
 
@@ -88,11 +87,14 @@ pub(crate) fn fstat(file: &File) -> io::Result<Metadata> {
     metadata(file.as_handle())
 }
 
-/// The entries of `dir` except `.` and `..`. The listing starts with the restart
-/// class, so it always reads from the first entry; two threads must not list the
-/// same `Dir` at once.
+/// The entries of `dir` except `.` and `..`, each with the metadata of its
+/// listing record (spec 7.4 rule 8), so a walk needs no open per entry. The
+/// listing starts with the restart class, so it always reads from the first
+/// entry; two threads must not list the same `Dir` at once.
 pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
     let listing = dir.as_handle();
+    // The records carry no volume serial: every entry shares the directory's.
+    let volume: FILE_ID_INFO = query(listing, FileIdInfo)?;
     // u64 elements: the records are 8-byte aligned.
     let mut buf = vec![0u64; 8 * 1024];
     let buf_bytes = (buf.len() * 8) as u32;
@@ -122,23 +124,32 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
             // SAFETY: the call filled the buffer with records chained by
             // NextEntryOffset, each 8-byte aligned and inside the buffer; fields are
             // read through the raw pointer, without a reference to the record.
-            let (next, attributes, tag, name) = unsafe {
+            let (next, meta, name) = unsafe {
                 let record = base.add(offset).cast::<FILE_ID_EXTD_DIR_INFO>();
                 let name_ptr = base
                     .add(offset + std::mem::offset_of!(FILE_ID_EXTD_DIR_INFO, FileName))
                     .cast::<u16>();
                 let len = (*record).FileNameLength as usize / 2;
+                let meta = Metadata {
+                    kind: kind((*record).FileAttributes, (*record).ReparsePointTag),
+                    mode: (*record).FileAttributes,
+                    size: u64::try_from((*record).EndOfFile).unwrap_or(0),
+                    modified: from_filetime((*record).LastWriteTime),
+                    changed: from_filetime((*record).ChangeTime),
+                    dev: volume.VolumeSerialNumber,
+                    ino: u128::from_le_bytes((*record).FileId.Identifier),
+                };
                 (
                     (*record).NextEntryOffset as usize,
-                    (*record).FileAttributes,
-                    (*record).ReparsePointTag,
+                    meta,
                     std::slice::from_raw_parts(name_ptr, len).to_vec(),
                 )
             };
             if name != [u16::from(b'.')] && name != [u16::from(b'.'), u16::from(b'.')] {
                 out.push(Entry {
                     name: OsString::from_wide(&name).into_encoded_bytes(),
-                    kind_hint: Some(kind(attributes, tag)),
+                    kind_hint: Some(meta.kind),
+                    metadata: Some(meta),
                 });
             }
             if next == 0 {
@@ -189,14 +200,21 @@ pub(crate) fn read_link_at(parent: &Dir, name: &OsStr, max: usize) -> io::Result
     Ok(bytes)
 }
 
-/// Opens the file `name` for reading relative to `parent`. A symbolic link is
-/// `IsSymlink`; a directory or another reparse point `Changed`.
+/// Opens the file `name` for reading relative to `parent`. A symbolic link, a
+/// link to a directory included, is `IsSymlink`; a directory or another reparse
+/// point `Changed`.
 pub(crate) fn open_read(parent: &Dir, name: &OsStr) -> Result<File, Error> {
     check_name(name)?;
     let handle = match nt::open(parent, name, FILE_GENERIC_READ, FILE_NON_DIRECTORY_FILE) {
         Ok(handle) => handle,
-        Err(e) if e.kind() == io::ErrorKind::IsADirectory => return Err(Error::Changed),
-        Err(e) => return Err(in_use_or(e)),
+        // A link to a directory carries the directory attribute; ask the entry.
+        Err(e) if e.kind() == io::ErrorKind::IsADirectory => {
+            return Err(match stat_at(parent, name)?.kind {
+                FileKind::Symlink => Error::IsSymlink,
+                _ => Error::Changed,
+            });
+        }
+        Err(e) => return Err(e.into()),
     };
     let tag: FILE_ATTRIBUTE_TAG_INFO = query(handle.as_handle(), FileAttributeTagInfo)?;
     if tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
@@ -269,10 +287,10 @@ pub(crate) fn rename_no_replace(
     rename(from_dir, from, to_dir, to, false, false)
 }
 
-/// `FileRenameInformationEx` on a handle to `from` itself, with `RootDirectory` set to
-/// `to_dir` and POSIX semantics. On `ERROR_INVALID_PARAMETER` (a filesystem
-/// without POSIX renames), or when `force_fallback` is set for a test, it uses
-/// `MoveFileExW` on the final paths instead.
+/// `FileRenameInformationEx` on a handle to `from` itself, with `RootDirectory`
+/// set to `to_dir` and POSIX semantics. On a filesystem without POSIX renames, or
+/// when `force_fallback` is set for a test, the classic `FileRenameInformation`
+/// on the same handles.
 fn rename(
     from_dir: &Dir,
     from: &OsStr,
@@ -289,30 +307,34 @@ fn rename(
         if replace {
             flags |= FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_IGNORE_READONLY_ATTRIBUTE;
         }
-        match rename_by_handle(handle.as_handle(), to_dir, to, flags) {
+        match rename_by_handle(
+            handle.as_handle(),
+            to_dir,
+            to,
+            flags,
+            FileRenameInformationEx,
+        ) {
             Ok(()) => return Ok(()),
             Err(e) if is_unsupported(&e) => {}
             Err(e) => return Err(in_use_or(e)),
         }
     }
-    // MoveFileExW cannot ignore the read-only attribute of the file it replaces.
+    // The classic class has no POSIX semantics and cannot ignore a read-only
+    // target, so clear the attribute first. It keeps RootDirectory, so the rename
+    // stays relative to the parent handle.
     if replace {
         clear_read_only(to_dir, to)?;
     }
-    let from_path = final_path(from_dir)?.join(from);
-    let to_path = final_path(to_dir)?.join(to);
-    // MoveFileExW opens the source itself.
-    drop(handle);
-    let wide = |p: &PathBuf| -> Vec<u16> { p.as_os_str().encode_wide().chain([0]).collect() };
-    let mut flags = MOVEFILE_WRITE_THROUGH;
-    if replace {
-        flags |= MOVEFILE_REPLACE_EXISTING;
-    }
-    // SAFETY: both paths are NUL-terminated wide strings that outlive the call.
-    let ok = unsafe { MoveFileExW(wide(&from_path).as_ptr(), wide(&to_path).as_ptr(), flags) };
-    if ok == 0 {
-        return Err(in_use_or(io::Error::last_os_error()));
-    }
+    // In the classic structure the first byte is ReplaceIfExists.
+    let replace_flag = u32::from(replace);
+    rename_by_handle(
+        handle.as_handle(),
+        to_dir,
+        to,
+        replace_flag,
+        FileRenameInformation,
+    )
+    .map_err(in_use_or)?;
     Ok(())
 }
 
@@ -345,11 +367,15 @@ fn clear_read_only_on(handle: BorrowedHandle<'_>) -> io::Result<bool> {
     Ok(true)
 }
 
+/// `NtSetInformationFile` with a `FILE_RENAME_INFORMATION` for `class`
+/// (`FileRenameInformationEx` takes flags, `FileRenameInformation` a
+/// ReplaceIfExists byte in the same place).
 fn rename_by_handle(
     handle: BorrowedHandle<'_>,
     to_dir: &Dir,
     to: &OsStr,
     flags: u32,
+    class: FILE_INFORMATION_CLASS,
 ) -> io::Result<()> {
     let name: Vec<u16> = to.encode_wide().collect();
     let header = std::mem::offset_of!(FILE_RENAME_INFORMATION, FileName);
@@ -380,7 +406,7 @@ fn rename_by_handle(
             &mut status_block,
             buf.as_ptr().cast(),
             size,
-            FileRenameInformationEx,
+            class,
         )
     };
     if status < 0 {
@@ -465,6 +491,9 @@ fn parse_link(buf: &[u8]) -> io::Result<Vec<u16>> {
         }
     };
     let name = |offset: usize, len: usize| -> io::Result<Vec<u16>> {
+        if !offset.is_multiple_of(2) || !len.is_multiple_of(2) {
+            return Err(invalid());
+        }
         let start = path_start + offset;
         let bytes = buf.get(start..start + len).ok_or_else(invalid)?;
         Ok(bytes
@@ -483,27 +512,6 @@ fn parse_link(buf: &[u8]) -> io::Result<Vec<u16>> {
     Ok(substitute
         .strip_prefix(prefix.as_slice())
         .map_or(substitute.clone(), <[u16]>::to_vec))
-}
-
-/// The path of an open directory, as `GetFinalPathNameByHandleW` reports it.
-fn final_path(dir: &Dir) -> io::Result<PathBuf> {
-    let mut buf = vec![0u16; 512];
-    loop {
-        let len = u32::try_from(buf.len()).map_err(io::Error::other)?;
-        // SAFETY: `buf` holds `len` writable wide characters.
-        let got = unsafe {
-            GetFinalPathNameByHandleW(dir.as_handle().as_raw_handle(), buf.as_mut_ptr(), len, 0)
-        };
-        if got == 0 {
-            return Err(io::Error::last_os_error());
-        }
-        let got = got as usize;
-        if got < buf.len() {
-            return Ok(PathBuf::from(OsString::from_wide(&buf[..got])));
-        }
-        // Too small: `got` is the size needed, NUL included.
-        buf.resize(got, 0);
-    }
 }
 
 /// Reads one information class into a value of the type that class fills.
@@ -794,6 +802,18 @@ mod tests {
             let entry_name = std::str::from_utf8(&entry.name).unwrap();
             let meta = stat_at(&root, name(entry_name)).unwrap();
             assert_eq!(entry.kind_hint, Some(meta.kind), "{entry_name}");
+            let listed = entry.metadata.unwrap();
+            assert_eq!(
+                (
+                    listed.kind,
+                    listed.size,
+                    listed.dev,
+                    listed.ino,
+                    listed.modified
+                ),
+                (meta.kind, meta.size, meta.dev, meta.ino, meta.modified),
+                "{entry_name}"
+            );
             assert_ne!(meta.ino, 0);
         }
         // A second listing of the same handle sees everything again.
@@ -899,7 +919,8 @@ mod tests {
             std::fs::read(tmp.path().join("sub").join("moved")).unwrap(),
             b"hello"
         );
-        // The fallback replaces too.
+        // The fallback replaces too, a read-only target included.
+        set_read_only(&tmp.path().join("sub").join("inner"));
         rename(&sub, name("moved"), &sub, name("inner"), true, true).unwrap();
         assert_eq!(
             std::fs::read(tmp.path().join("sub").join("inner")).unwrap(),
@@ -980,6 +1001,22 @@ mod tests {
             std::fs::read(outside.path().join("sentinel")).unwrap(),
             b"outside"
         );
+    }
+
+    #[test]
+    fn parse_link_rejects_malformed_data() {
+        let mut symlink = Vec::new();
+        symlink.extend_from_slice(&IO_REPARSE_TAG_SYMLINK.to_le_bytes());
+        symlink.extend_from_slice(&[0; 4]);
+        // Substitute name at 0, 2 bytes; print name at 2, 3 bytes (odd).
+        for v in [0u16, 2, 2, 3] {
+            symlink.extend_from_slice(&v.to_le_bytes());
+        }
+        symlink.extend_from_slice(&[0; 4]);
+        symlink.extend_from_slice(&[b'a', 0, b'b', 0, b'c']);
+        assert!(parse_link(&symlink).is_err());
+        assert!(parse_link(&symlink[..10]).is_err());
+        assert!(parse_link(&[]).is_err());
     }
 
     #[test]
