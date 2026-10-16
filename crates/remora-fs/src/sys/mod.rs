@@ -14,28 +14,51 @@
 #[cfg(not(any(target_os = "linux", target_os = "macos", windows)))]
 compile_error!("remora-fs supports Linux, macOS and Windows only");
 
+mod create;
 mod dir;
+mod name;
+#[cfg(windows)]
+mod nt;
 pub mod random;
+#[cfg(windows)]
+pub(crate) mod security;
+#[cfg(unix)]
+mod umask;
 
+pub(crate) use create::{create_dir, create_file};
 pub use dir::Dir;
+#[cfg(unix)]
+pub(crate) use umask::ScopedUmask;
 
 #[cfg(test)]
 pub(crate) mod test_dir {
     use std::path::{Path, PathBuf};
 
-    /// A fresh directory under the system temporary directory, removed on drop.
+    /// A fresh directory under `REMORA_TEST_FS`, or the system temporary directory
+    /// when it is unset, removed on drop.
     pub(crate) struct TestDir(PathBuf);
 
     impl TestDir {
         pub(crate) fn new() -> Self {
-            let path =
-                std::env::temp_dir().join(format!("remora-fs-{}", super::random::hex(8).unwrap()));
+            let root =
+                std::env::var_os("REMORA_TEST_FS").map_or_else(std::env::temp_dir, PathBuf::from);
+            let path = root.join(format!("remora-fs-{}", super::random::hex(8).unwrap()));
+            let _lock = crate::private::creation_lock();
             std::fs::create_dir(&path).unwrap();
             Self(path)
         }
 
         pub(crate) fn path(&self) -> &Path {
             &self.0
+        }
+
+        /// Creates `rel` and its missing parents. Holds the creation lock, so a test
+        /// that narrows the umask cannot leave the directories untraversable.
+        pub(crate) fn mkdir_all(&self, rel: &str) -> PathBuf {
+            let path = self.0.join(rel);
+            let _lock = crate::private::creation_lock();
+            std::fs::create_dir_all(&path).unwrap();
+            path
         }
     }
 

@@ -26,6 +26,16 @@ impl Dir {
     pub fn open(path: &Path) -> io::Result<Self> {
         imp::open(path)
     }
+
+    #[cfg(unix)]
+    pub(super) fn from_fd(fd: std::os::fd::OwnedFd) -> Self {
+        Self { fd }
+    }
+
+    #[cfg(windows)]
+    pub(super) fn from_handle(handle: std::os::windows::io::OwnedHandle) -> Self {
+        Self { handle }
+    }
 }
 
 #[cfg(unix)]
@@ -146,7 +156,7 @@ mod tests {
     #[test]
     fn refuses_a_symlink_as_last_component() {
         let tmp = TestDir::new();
-        std::fs::create_dir(tmp.path().join("real")).unwrap();
+        tmp.mkdir_all("real");
         symlink_dir(&tmp.path().join("real"), &tmp.path().join("link")).unwrap();
         let err = Dir::open(&tmp.path().join("link")).unwrap_err();
         #[cfg(unix)]
@@ -159,7 +169,7 @@ mod tests {
     #[test]
     fn follows_a_symlink_in_a_leading_component() {
         let tmp = TestDir::new();
-        std::fs::create_dir_all(tmp.path().join("real").join("sub")).unwrap();
+        tmp.mkdir_all("real/sub");
         symlink_dir(&tmp.path().join("real"), &tmp.path().join("link")).unwrap();
         let dir = Dir::open(&tmp.path().join("link").join("sub")).unwrap();
         assert!(reopen(&dir).metadata().unwrap().is_dir());
