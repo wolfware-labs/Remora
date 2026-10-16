@@ -1,34 +1,36 @@
-//! Descriptor-relative system calls (Unix): each takes an open directory and a
-//! single name, so no path string is resolved (spec 5.5).
+//! Descriptor-relative system calls on Unix, through `rustix`.
 
-use super::Dir;
-use super::name::check_name;
+use crate::Error;
 use crate::nofollow::{Entry, FileKind, Metadata, Timestamp};
+use crate::sys::Dir;
+use crate::sys::name::check_name;
 use rustix::fs::{AtFlags, FileType, Mode, OFlags, Stat, Timespec, Timestamps};
+use rustix::io::Errno;
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
 
-/// `openat(parent, name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`.
-pub(crate) fn open_dir(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
+/// `openat(parent, name, O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)`. A symlink is
+/// `IsSymlink`, anything else that is not a directory `NotADirectory`.
+pub(crate) fn open_dir(parent: &Dir, name: &OsStr) -> Result<Dir, Error> {
     check_name(name)?;
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    Ok(Dir::from_fd(rustix::fs::openat(
-        parent,
-        name,
-        flags,
-        Mode::empty(),
-    )?))
+    match rustix::fs::openat(parent, name, flags, Mode::empty()) {
+        Ok(fd) => Ok(Dir::from_fd(fd)),
+        // Linux reports a symlink as ENOTDIR here, macOS as ELOOP; ask the entry.
+        Err(Errno::NOTDIR | Errno::LOOP) => match stat_at(parent, name)?.kind {
+            FileKind::Symlink => Err(Error::IsSymlink),
+            _ => Err(Error::NotADirectory),
+        },
+        Err(e) => Err(io::Error::from(e).into()),
+    }
 }
 
 /// `fstatat(parent, name, AT_SYMLINK_NOFOLLOW)`.
 pub(crate) fn stat_at(parent: &Dir, name: &OsStr) -> io::Result<Metadata> {
     check_name(name)?;
-    Ok(metadata(&rustix::fs::statat(
-        parent,
-        name,
-        AtFlags::SYMLINK_NOFOLLOW,
-    )?))
+    let st = rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW)?;
+    Ok(metadata(&st))
 }
 
 /// `fstat` of an open file.
@@ -47,10 +49,12 @@ pub(crate) fn entries(dir: &Dir) -> io::Result<Vec<Entry>> {
         if name == b"." || name == b".." {
             continue;
         }
-        out.push(Entry {
-            name: name.to_vec(),
-            kind_hint: kind_hint(entry.file_type()),
-        });
+        let name = std::os::unix::ffi::OsStrExt::from_bytes(name);
+        out.push(Entry::new(
+            OsStr::to_owned(name),
+            kind_hint(entry.file_type()),
+            None,
+        ));
     }
     Ok(out)
 }
@@ -72,40 +76,48 @@ pub(crate) fn read_link_at(parent: &Dir, name: &OsStr, max: usize) -> io::Result
 }
 
 /// `openat(parent, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)`. The
-/// non-blocking flag keeps an open of a FIFO from waiting for a writer.
-pub(crate) fn open_read_nonblocking(parent: &Dir, name: &OsStr) -> io::Result<File> {
+/// non-blocking flag keeps an open of a FIFO from waiting for a writer; a symlink
+/// is `IsSymlink`. Call [`finish_read`] once the file is accepted.
+pub(crate) fn open_read(parent: &Dir, name: &OsStr) -> Result<File, Error> {
     check_name(name)?;
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    Ok(File::from(rustix::fs::openat(
-        parent,
-        name,
-        flags,
-        Mode::empty(),
-    )?))
+    match rustix::fs::openat(parent, name, flags, Mode::empty()) {
+        Ok(fd) => Ok(File::from(fd)),
+        Err(Errno::LOOP) => Err(Error::IsSymlink),
+        Err(e) => Err(io::Error::from(e).into()),
+    }
 }
 
-/// Clears `O_NONBLOCK` on an open file.
-pub(crate) fn set_blocking(file: &File) -> io::Result<()> {
+/// Clears `O_NONBLOCK` on a file from [`open_read`], for blocking reads.
+pub(crate) fn finish_read(file: &File) -> io::Result<()> {
     let flags = rustix::fs::fcntl_getfl(file)?;
     Ok(rustix::fs::fcntl_setfl(file, flags - OFlags::NONBLOCK)?)
 }
 
 /// `unlinkat(parent, name, 0 or AT_REMOVEDIR)`. A symlink is removed itself.
-pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> io::Result<()> {
+pub(crate) fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> Result<(), Error> {
     check_name(name)?;
     let flags = if is_dir {
         AtFlags::REMOVEDIR
     } else {
         AtFlags::empty()
     };
-    Ok(rustix::fs::unlinkat(parent, name, flags)?)
+    rustix::fs::unlinkat(parent, name, flags).map_err(io::Error::from)?;
+    Ok(())
 }
 
-/// `renameat(from_dir, from, to_dir, to)`. A symlink is renamed itself.
-pub(crate) fn rename_at(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+/// `renameat(from_dir, from, to_dir, to)`, replacing a file at `to`. A symlink is
+/// renamed itself.
+pub(crate) fn rename_at(
+    from_dir: &Dir,
+    from: &OsStr,
+    to_dir: &Dir,
+    to: &OsStr,
+) -> Result<(), Error> {
     check_name(from)?;
     check_name(to)?;
-    Ok(rustix::fs::renameat(from_dir, from, to_dir, to)?)
+    rustix::fs::renameat(from_dir, from, to_dir, to).map_err(io::Error::from)?;
+    Ok(())
 }
 
 /// `utimensat(parent, name, times, AT_SYMLINK_NOFOLLOW)`: a symlink's own times.
@@ -157,7 +169,7 @@ fn metadata(st: &Stat) -> Metadata {
         modified: stamp(st.st_mtime as i64, st.st_mtime_nsec as i64),
         changed: stamp(st.st_ctime as i64, st.st_ctime_nsec as i64),
         dev: st.st_dev as u64,
-        ino: st.st_ino as u64,
+        ino: u128::from(st.st_ino as u64),
     }
 }
 
@@ -211,7 +223,7 @@ mod tests {
     #[test]
     fn fstat_matches_stat_at() {
         let (_tmp, dir) = setup();
-        let file = open_read_nonblocking(&dir, name("file")).unwrap();
+        let file = open_read(&dir, name("file")).unwrap();
         let (a, b) = (fstat(&file).unwrap(), stat_at(&dir, name("file")).unwrap());
         assert_eq!((a.dev, a.ino, a.kind), (b.dev, b.ino, b.kind));
     }
@@ -235,11 +247,11 @@ mod tests {
     }
 
     #[test]
-    fn open_read_nonblocking_refuses_symlink_and_reads_after_set_blocking() {
+    fn open_read_nonblocking_refuses_symlink_and_reads_after_finish_read() {
         let (_tmp, dir) = setup();
-        assert!(open_read_nonblocking(&dir, name("link")).is_err());
-        let mut file = open_read_nonblocking(&dir, name("file")).unwrap();
-        set_blocking(&file).unwrap();
+        assert!(open_read(&dir, name("link")).is_err());
+        let mut file = open_read(&dir, name("file")).unwrap();
+        finish_read(&file).unwrap();
         assert!(
             !rustix::fs::fcntl_getfl(&file)
                 .unwrap()

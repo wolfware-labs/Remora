@@ -15,6 +15,9 @@ pub enum Error {
     /// The entry changed between the walk's `stat` and the open: another type or
     /// another file (identity).
     Changed,
+    /// Another process holds the entry open without sharing delete access
+    /// (Windows), so it cannot be renamed or deleted now (`in_use`).
+    InUse,
     /// A component of a parent chain is not a real directory. Holds the key prefix
     /// up to and including that component (`unsafe_parent`).
     UnsafeParent(Vec<u8>),
@@ -27,6 +30,7 @@ impl fmt::Display for Error {
             Self::IsSymlink => f.write_str("is a symlink"),
             Self::NotADirectory => f.write_str("not a directory"),
             Self::Changed => f.write_str("changed while being opened"),
+            Self::InUse => f.write_str("in use by another process"),
             Self::UnsafeParent(prefix) => {
                 write!(f, "unsafe parent: {}", String::from_utf8_lossy(prefix))
             }
@@ -54,6 +58,7 @@ impl From<Error> for io::Error {
         match e {
             Error::Io(e) => e,
             Error::NotADirectory => io::ErrorKind::NotADirectory.into(),
+            Error::InUse => io::Error::new(io::ErrorKind::ResourceBusy, Error::InUse),
             other => io::Error::other(other),
         }
     }

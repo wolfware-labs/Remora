@@ -19,6 +19,18 @@ pub(crate) fn check_name(name: &OsStr) -> io::Result<()> {
     Ok(())
 }
 
+/// The name for raw bytes as `entries` reports them: any bytes on Unix, UTF-8 on
+/// Windows (where `entries` gives WTF-8, a name with an unpaired surrogate cannot
+/// be named back).
+pub(crate) fn name_from_bytes(bytes: &[u8]) -> io::Result<&OsStr> {
+    #[cfg(unix)]
+    return Ok(std::os::unix::ffi::OsStrExt::from_bytes(bytes));
+    #[cfg(windows)]
+    return std::str::from_utf8(bytes)
+        .map(OsStr::new)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidFilename, "name is not valid Unicode"));
+}
+
 fn is_bad_on_windows(b: u8) -> bool {
     b < 0x20 || b"\\<>:\"|?*".contains(&b)
 }

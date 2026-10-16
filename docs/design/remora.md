@@ -265,9 +265,9 @@ A capability has exactly one owner. Other code MUST call the owner and MUST NOT 
 3. `renameat` the temporary file over `name`.
 4. `fsync` `dir`.
 
-On Windows, step 2 flushes through a writable handle (`FlushFileBuffers`), step 3 is the handle rename of §5.9 rule 2 (`FileRenameInfoEx` with POSIX semantics, falling back to `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH`), and step 4 is skipped: NTFS and ReFS journal the rename metadata.
+On Windows, step 2 flushes through a writable handle (`FlushFileBuffers`), step 3 is the handle rename of §5.9 rule 2 (`FileRenameInformationEx` with POSIX semantics, falling back to `FileRenameInformation`), and step 4 is skipped: NTFS and ReFS journal the rename metadata.
 
-`create_exclusive_atomic(dir, name, bytes)` is the no-replace variant used for the machine key: steps 1 and 2, then `renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS, and on Windows the handle rename of §5.9 rule 2 without `FILE_RENAME_FLAG_REPLACE_IF_EXISTS` (falling back to `MoveFileExW` without `MOVEFILE_REPLACE_EXISTING`). If the filesystem does not support the no-replace rename, it falls back to `linkat` plus `unlinkat` of the temporary file. If neither works, it fails with `unsupported_filesystem`. If the target exists, the caller receives `AlreadyExists` and reads the existing file.
+`create_exclusive_atomic(dir, name, bytes)` is the no-replace variant used for the machine key: steps 1 and 2, then `renameat2(RENAME_NOREPLACE)` on Linux, `renamex_np(RENAME_EXCL)` on macOS, and on Windows the handle rename of §5.9 rule 2 without `FILE_RENAME_REPLACE_IF_EXISTS` (falling back to `FileRenameInformation` with `ReplaceIfExists` false). If the filesystem does not support the no-replace rename, it falls back to `linkat` plus `unlinkat` of the temporary file. If neither works, it fails with `unsupported_filesystem`. If the target exists, the caller receives `AlreadyExists` and reads the existing file.
 
 ### 5.5 Symlink-safe access
 
@@ -325,7 +325,7 @@ Order constraints:
 These rules apply to every Windows open, rename and delete in a project tree, a store or `<data>` (D-77):
 
 1. Every open uses `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` and `FILE_FLAG_OPEN_REPARSE_POINT`, plus `FILE_FLAG_BACKUP_SEMANTICS` for directories, so a snapshot never makes the agent's concurrent writes, deletes or renames fail. The identity check of §5.5 rule 3 compares the volume serial and 128-bit file id of `FILE_ID_INFO`.
-2. Renames use `SetFileInformationByHandle(FileRenameInfoEx)` with `FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS`. On `ERROR_INVALID_PARAMETER` (a filesystem without POSIX semantics) the rename falls back to `MoveFileExW`. A sharing violation fails that key with `in_use`.
+2. Renames use `NtSetInformationFile(FileRenameInformationEx)` on a handle to the source, with `RootDirectory` set to the target's parent and `FILE_RENAME_REPLACE_IF_EXISTS | FILE_RENAME_POSIX_SEMANTICS | FILE_RENAME_IGNORE_READONLY_ATTRIBUTE` (the Win32 `SetFileInformationByHandle` refuses a `RootDirectory`). On `STATUS_INVALID_PARAMETER` or `STATUS_NOT_SUPPORTED` (a filesystem without POSIX renames) it falls back to the classic `FileRenameInformation` on the same handles, after clearing the target's read-only attribute, so the rename stays relative to the parent handle. A sharing violation fails that key with `in_use`.
 3. Deletes use `SetFileInformationByHandle(FileDispositionInfoEx)` with `FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS | FILE_DISPOSITION_FLAG_IGNORE_READONLY_ATTRIBUTE`, so read-only blobs can be replaced, pruned and forgotten.
 
 ---

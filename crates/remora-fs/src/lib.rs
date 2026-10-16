@@ -2,7 +2,6 @@
 //! points, symlink-safe open and walk, locks, clones and SQLite connection setup.
 
 mod error;
-#[cfg(unix)]
 pub mod nofollow;
 pub mod private;
 

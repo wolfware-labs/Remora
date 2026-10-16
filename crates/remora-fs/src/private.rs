@@ -7,7 +7,7 @@ use crate::sys::{self, Dir};
 use std::ffi::OsStr;
 use std::fs::File;
 use std::io;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Creates the directory `name` in `parent`, exclusively, and opens it.
@@ -71,20 +71,14 @@ pub fn create_dir_all_private(path: &Path) -> io::Result<Dir> {
     if missing.is_empty() {
         return Dir::open(path);
     }
-    let mut current: PathBuf = std::fs::canonicalize(existing)?;
-    let mut dir = Dir::open(&current)?;
+    let mut dir = Dir::open(&std::fs::canonicalize(existing)?)?;
     for name in missing.into_iter().rev() {
-        current.push(name);
         dir = match create_dir_private(&dir, name) {
             // Another process created it in between: open what is there, relative to
-            // the parent and without following a link. Windows opens by path until
-            // #10 adds the relative open there.
-            #[cfg(unix)]
+            // the parent and without following a link.
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
                 crate::nofollow::open_dir(&dir, name)?
             }
-            #[cfg(windows)]
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Dir::open(&current)?,
             result => result?,
         };
     }
