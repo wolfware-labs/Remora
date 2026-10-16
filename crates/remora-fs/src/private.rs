@@ -76,8 +76,14 @@ pub fn create_dir_all_private(path: &Path) -> io::Result<Dir> {
     for name in missing.into_iter().rev() {
         current.push(name);
         dir = match create_dir_private(&dir, name) {
-            // Another process created it in between: open what is there. By path, as
-            // the existing ancestors above are; #9 adds the parent-relative open.
+            // Another process created it in between: open what is there, relative to
+            // the parent and without following a link. Windows opens by path until
+            // #10 adds the relative open there.
+            #[cfg(unix)]
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                crate::nofollow::open_dir(&dir, name)?
+            }
+            #[cfg(windows)]
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Dir::open(&current)?,
             result => result?,
         };

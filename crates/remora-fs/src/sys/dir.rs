@@ -27,6 +27,18 @@ impl Dir {
         imp::open(path)
     }
 
+    /// A second handle to the same open directory.
+    pub fn try_clone(&self) -> io::Result<Self> {
+        #[cfg(unix)]
+        return Ok(Self {
+            fd: self.fd.try_clone()?,
+        });
+        #[cfg(windows)]
+        return Ok(Self {
+            handle: self.handle.try_clone()?,
+        });
+    }
+
     #[cfg(unix)]
     pub(super) fn from_fd(fd: std::os::fd::OwnedFd) -> Self {
         Self { fd }
