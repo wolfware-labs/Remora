@@ -16,9 +16,21 @@ unsafe_code = "deny"
 [lints.clippy]
 unwrap_used = "deny"
 expect_used = "deny"
+# Rule 3 of spec 3.5: every `unsafe` block states its invariant.
+undocumented_unsafe_blocks = "deny"
 
 [features]
 sqlite = []
 
 [dependencies]
 remora-types.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1.5", default-features = false, features = ["std", "fs", "rand"] }
+
+# Only for the macOS calls rustix does not wrap (spec 3.5, OQ-25).
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61.2", features = ["Win32_Security_Cryptography", "Win32_Storage_FileSystem"] }
