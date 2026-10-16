@@ -4,11 +4,9 @@
 //! a real directory stops the operation.
 
 use crate::Error;
-use crate::sys::{Dir, at};
+use crate::sys::{Dir, at, name_from_bytes};
 use std::ffi::OsStr;
 use std::fs::File;
-use std::io;
-use std::os::unix::ffi::OsStrExt;
 
 /// The longest symlink target Remora reads (spec 7.11).
 pub const MAX_LINK_TARGET: usize = 4096;
@@ -18,8 +16,11 @@ pub enum FileKind {
     File,
     Dir,
     Symlink,
-    /// A FIFO, socket or device.
+    /// A FIFO, socket or device (Unix).
     Other,
+    /// A Windows reparse point whose tag is neither a symbolic link nor a junction
+    /// (cloud placeholders, deduplicated files), with that tag.
+    ReparsePoint(u32),
 }
 
 /// Seconds and nanoseconds since the Unix epoch.
@@ -33,22 +34,26 @@ pub struct Timestamp {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Metadata {
     pub kind: FileKind,
-    /// Permission bits, including setuid, setgid and sticky.
+    /// Unix: the permission bits, setuid, setgid and sticky included. Windows: the
+    /// file attributes (`FILE_ATTRIBUTE_*`), so a link to a directory carries
+    /// `FILE_ATTRIBUTE_DIRECTORY`.
     pub mode: u32,
     pub size: u64,
     pub modified: Timestamp,
     /// The inode change time.
     pub changed: Timestamp,
-    /// The filesystem, so a walk can refuse to cross into another one.
+    /// The filesystem, so a walk can refuse to cross into another one: `st_dev` on
+    /// Unix, the volume serial number on Windows.
     pub dev: u64,
-    pub ino: u64,
+    /// The file within it: `st_ino` on Unix, the 128-bit file id on Windows.
+    pub ino: u128,
 }
 
 /// One directory entry. The kind is a hint from the listing and can be stale or
 /// missing; `stat_at` is authoritative.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
-    /// The raw name; nothing here requires UTF-8.
+    /// The raw name; nothing here requires UTF-8. On Windows the name in WTF-8.
     pub name: Vec<u8>,
     pub kind_hint: Option<FileKind>,
 }
@@ -56,12 +61,7 @@ pub struct Entry {
 /// Opens the subdirectory `name` of `parent`. A symlink is `IsSymlink`, anything
 /// else that is not a directory `NotADirectory`.
 pub fn open_dir(parent: &Dir, name: &OsStr) -> Result<Dir, Error> {
-    match at::open_dir(parent, name) {
-        Ok(dir) => Ok(dir),
-        // Linux reports a symlink as ENOTDIR here, macOS as ELOOP; ask the entry.
-        Err(e) if is_not_dir_or_loop(&e) => Err(classify(parent, name, e)),
-        Err(e) => Err(e.into()),
-    }
+    at::open_dir(parent, name)
 }
 
 /// The entries of `dir`, unsorted, without `.` and `..`.
@@ -89,31 +89,25 @@ pub fn open_file_read(parent: &Dir, name: &OsStr, expected: &Metadata) -> Result
     if expected.kind != FileKind::File {
         return Err(Error::Changed);
     }
-    let file = match at::open_read_nonblocking(parent, name) {
-        Ok(file) => file,
-        Err(e) if e.raw_os_error() == Some(rustix::io::Errno::LOOP.raw_os_error()) => {
-            return Err(Error::IsSymlink);
-        }
-        Err(e) => return Err(e.into()),
-    };
+    let file = at::open_read(parent, name)?;
     let actual = at::fstat(&file)?;
     if actual.kind != FileKind::File || (actual.dev, actual.ino) != (expected.dev, expected.ino) {
         return Err(Error::Changed);
     }
-    at::set_blocking(&file)?;
+    at::finish_read(&file)?;
     Ok(file)
 }
 
 /// Removes `name` from `parent`: the entry itself, a symlink included. `is_dir`
 /// removes an empty directory.
 pub fn unlink_at(parent: &Dir, name: &OsStr, is_dir: bool) -> Result<(), Error> {
-    Ok(at::unlink_at(parent, name, is_dir)?)
+    at::unlink_at(parent, name, is_dir)
 }
 
 /// Renames `from` in `from_dir` to `to` in `to_dir`, replacing a file there. A
 /// symlink is renamed itself.
 pub fn rename_at(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> Result<(), Error> {
-    Ok(at::rename_at(from_dir, from, to_dir, to)?)
+    at::rename_at(from_dir, from, to_dir, to)
 }
 
 /// Sets the access and modification times of `name` itself, a symlink's own times
@@ -136,7 +130,7 @@ pub fn reopen_parent<'k>(root: &Dir, key: &'k [u8]) -> Result<(Dir, &'k OsStr), 
     // Every component, the returned name included, is one valid name: not empty,
     // `.` or `..`, and free of NUL.
     for component in &components {
-        crate::sys::check_name(OsStr::from_bytes(component))?;
+        crate::sys::check_name(name_from_bytes(component)?)?;
     }
     let (last, parents) = components.split_last().ok_or(Error::NotADirectory)?;
     let mut dir: Option<Dir> = None;
@@ -144,7 +138,7 @@ pub fn reopen_parent<'k>(root: &Dir, key: &'k [u8]) -> Result<(Dir, &'k OsStr), 
     for component in parents {
         prefix_len += component.len() + usize::from(prefix_len > 0);
         let parent = dir.as_ref().unwrap_or(root);
-        dir = Some(match open_dir(parent, OsStr::from_bytes(component)) {
+        dir = Some(match open_dir(parent, name_from_bytes(component)?) {
             Ok(next) => next,
             Err(Error::IsSymlink | Error::NotADirectory) => {
                 return Err(Error::UnsafeParent(key[..prefix_len].to_vec()));
@@ -156,7 +150,7 @@ pub fn reopen_parent<'k>(root: &Dir, key: &'k [u8]) -> Result<(Dir, &'k OsStr), 
         Some(dir) => dir,
         None => root.try_clone()?,
     };
-    Ok((dir, OsStr::from_bytes(last)))
+    Ok((dir, name_from_bytes(last)?))
 }
 
 /// Deletes `name` in `parent` and everything below it, depth-first through
@@ -171,24 +165,24 @@ pub fn remove_tree(parent: &Dir, name: &OsStr) -> Result<(), Error> {
     // subdirectories still to remove. Every directory is listed once; the stack
     // keeps a deep tree from exhausting the thread stack.
     let pending = clear_files(&top)?;
-    let mut stack: Vec<Level> = vec![(top, name.as_bytes().to_vec(), pending)];
+    let mut stack: Vec<Level> = vec![(top, name.as_encoded_bytes().to_vec(), pending)];
     while let Some((dir, _, pending)) = stack.last_mut() {
         match pending.pop() {
-            Some(child) => match open_dir(dir, OsStr::from_bytes(&child)) {
+            Some(child) => match open_dir(dir, name_from_bytes(&child)?) {
                 Ok(child_dir) => {
                     let below = clear_files(&child_dir)?;
                     stack.push((child_dir, child, below));
                 }
                 // Replaced by a link or a file since the listing: remove it as one.
                 Err(Error::IsSymlink | Error::NotADirectory) => {
-                    unlink_at(dir, OsStr::from_bytes(&child), false)?;
+                    unlink_at(dir, name_from_bytes(&child)?, false)?;
                 }
                 Err(e) => return Err(e),
             },
             None => {
                 let (_, done, _) = stack.pop().ok_or(Error::NotADirectory)?;
                 let above = stack.last().map_or(parent, |(dir, _, _)| dir);
-                unlink_at(above, OsStr::from_bytes(&done), true)?;
+                unlink_at(above, name_from_bytes(&done)?, true)?;
             }
         }
     }
@@ -202,7 +196,7 @@ type Level = (Dir, Vec<u8>, Vec<Vec<u8>>);
 fn clear_files(dir: &Dir) -> Result<Vec<Vec<u8>>, Error> {
     let mut subdirs = Vec::new();
     for entry in at::entries(dir)? {
-        let child = OsStr::from_bytes(&entry.name);
+        let child = name_from_bytes(&entry.name)?;
         if at::stat_at(dir, child)?.kind == FileKind::Dir {
             subdirs.push(entry.name);
         } else {
@@ -212,24 +206,15 @@ fn clear_files(dir: &Dir) -> Result<Vec<Vec<u8>>, Error> {
     Ok(subdirs)
 }
 
-fn is_not_dir_or_loop(e: &io::Error) -> bool {
-    use rustix::io::Errno;
-    let code = e.raw_os_error();
-    code == Some(Errno::NOTDIR.raw_os_error()) || code == Some(Errno::LOOP.raw_os_error())
-}
-
-fn classify(parent: &Dir, name: &OsStr, original: io::Error) -> Error {
-    match at::stat_at(parent, name) {
-        Ok(meta) if meta.kind == FileKind::Symlink => Error::IsSymlink,
-        Ok(_) => Error::NotADirectory,
-        Err(_) => Error::Io(original),
-    }
-}
-
+// Windows has its own tests below: links there need a privilege and junctions a
+// helper, so the trees are built differently.
 #[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
     use crate::sys::test_dir::TestDir;
+    use std::io;
+    use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::symlink;
     use std::path::Path;
 
