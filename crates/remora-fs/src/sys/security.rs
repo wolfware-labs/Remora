@@ -38,7 +38,8 @@ impl Sid {
         if ok == 0 && unsafe { GetLastError() } != ERROR_INSUFFICIENT_BUFFER {
             return Err(io::Error::last_os_error());
         }
-        let mut buf = vec![0u32; (len as usize).div_ceil(4)];
+        // `usize` elements: TOKEN_USER holds a pointer, so it needs pointer alignment.
+        let mut buf = vec![0usize; (len as usize).div_ceil(size_of::<usize>())];
         // SAFETY: `buf` holds at least `len` writable bytes, aligned for TOKEN_USER.
         check(unsafe {
             GetTokenInformation(raw, TokenUser, buf.as_mut_ptr().cast(), len, &mut len)

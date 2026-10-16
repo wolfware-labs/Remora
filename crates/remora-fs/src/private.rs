@@ -286,6 +286,10 @@ mod tests {
         #[cfg(windows)]
         std::os::windows::fs::symlink_dir(&real, tmp.path().join("link")).unwrap();
         assert!(create_dir_all_private(&tmp.path().join("link")).is_err());
+        // An existing component that is a file stops the walk before anything is made.
+        std::fs::write(tmp.path().join("file"), b"").unwrap();
+        let err = create_dir_all_private(&tmp.path().join("file").join("child")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory, "{err}");
         // A symlink in a leading component is followed.
         create_dir_all_private(&tmp.path().join("link").join("child")).unwrap();
         assert!(real.join("child").is_dir());
