@@ -15,7 +15,8 @@ pub(crate) fn create_dir(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
 }
 
 /// Creates the file `name` in `parent`, opened for reading and writing. Unix: mode
-/// `0o600`. Windows: owner the current user, DACL inherited from `parent`.
+/// `0o600`. Windows: owner the current user, DACL inherited from `parent`, which
+/// is owner-only when `parent` is (spec 5.1 rule 2).
 pub(crate) fn create_file(parent: &Dir, name: &OsStr) -> io::Result<File> {
     check_name(name)?;
     imp::create_file(parent, name)

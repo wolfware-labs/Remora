@@ -22,9 +22,13 @@ pub fn create_dir_private(parent: &Dir, name: &OsStr) -> io::Result<Dir> {
 
 /// Creates the file `name` in `parent`, exclusively, open for reading and writing.
 ///
-/// Unix: mode `0o600`. Windows: owner the current user, DACL inherited from the
-/// owner-only parent. An existing name, a symlink included, fails with
-/// `AlreadyExists`; a symlink's target is never opened.
+/// Unix: mode `0o600`, whatever the parent. Windows: owner the current user and the
+/// DACL inherited from `parent` (spec 5.1 rule 2), so the file is owner-only when
+/// `parent` is: in `<data>`, a store or a blob home every directory comes from
+/// [`create_dir_private`], and #62 checks the ones that already exist.
+///
+/// An existing name, a symlink included, fails with `AlreadyExists`; a symlink's
+/// target is never opened.
 pub fn create_private_file(parent: &Dir, name: &OsStr) -> io::Result<File> {
     let _lock = creation_lock();
     sys::create_file(parent, name)
