@@ -174,32 +174,49 @@ pub fn remove_tree(parent: &Dir, name: &OsStr) -> Result<(), Error> {
         Err(Error::IsSymlink | Error::NotADirectory) => return unlink_at(parent, name, false),
         Err(e) => return Err(e),
     };
-    // Each level holds its directory and its name in the level above; the stack
+    // Each level holds its directory, its name in the level above and the
+    // subdirectories still to remove. Every directory is listed once; the stack
     // keeps a deep tree from exhausting the thread stack.
-    let mut stack: Vec<(Dir, Vec<u8>)> = vec![(top, name.as_bytes().to_vec())];
-    while let Some((dir, _)) = stack.last() {
-        let mut subdir = None;
-        for entry in at::entries(dir)? {
-            let child = OsStr::from_bytes(&entry.name);
-            match open_dir(dir, child) {
+    let pending = clear_files(&top)?;
+    let mut stack: Vec<Level> = vec![(top, name.as_bytes().to_vec(), pending)];
+    while let Some((dir, _, pending)) = stack.last_mut() {
+        match pending.pop() {
+            Some(child) => match open_dir(dir, OsStr::from_bytes(&child)) {
                 Ok(child_dir) => {
-                    subdir = Some((child_dir, entry.name));
-                    break;
+                    let below = clear_files(&child_dir)?;
+                    stack.push((child_dir, child, below));
                 }
-                Err(Error::IsSymlink | Error::NotADirectory) => unlink_at(dir, child, false)?,
+                // Replaced by a link or a file since the listing: remove it as one.
+                Err(Error::IsSymlink | Error::NotADirectory) => {
+                    unlink_at(dir, OsStr::from_bytes(&child), false)?;
+                }
                 Err(e) => return Err(e),
-            }
-        }
-        match subdir {
-            Some(next) => stack.push(next),
+            },
             None => {
-                let (_, done) = stack.pop().ok_or(Error::NotADirectory)?;
-                let above = stack.last().map_or(parent, |(dir, _)| dir);
+                let (_, done, _) = stack.pop().ok_or(Error::NotADirectory)?;
+                let above = stack.last().map_or(parent, |(dir, _, _)| dir);
                 unlink_at(above, OsStr::from_bytes(&done), true)?;
             }
         }
     }
     Ok(())
+}
+
+type Level = (Dir, Vec<u8>, Vec<Vec<u8>>);
+
+/// Unlinks every entry of `dir` that is not a real directory and returns the names
+/// of the subdirectories.
+fn clear_files(dir: &Dir) -> Result<Vec<Vec<u8>>, Error> {
+    let mut subdirs = Vec::new();
+    for entry in at::entries(dir)? {
+        let child = OsStr::from_bytes(&entry.name);
+        if at::stat_at(dir, child)?.kind == FileKind::Dir {
+            subdirs.push(entry.name);
+        } else {
+            unlink_at(dir, child, false)?;
+        }
+    }
+    Ok(subdirs)
 }
 
 fn is_not_dir_or_loop(e: &io::Error) -> bool {
@@ -477,6 +494,21 @@ mod tests {
         symlink(outside.path().join("keep"), tmp.path().join("top-link")).unwrap();
         remove_tree(&root, name("top-link")).unwrap();
         assert!(outside.path().join("keep").is_dir());
+    }
+
+    #[test]
+    fn remove_tree_removes_wide_and_deep_trees() {
+        let tmp = TestDir::new();
+        for i in 0..30 {
+            tmp.mkdir_all(&format!("wide/d{i}"));
+            std::fs::write(tmp.path().join(format!("wide/d{i}/f")), b"x").unwrap();
+        }
+        let deep: Vec<String> = (0..40).map(|i| format!("n{i}")).collect();
+        tmp.mkdir_all(&format!("deep/{}", deep.join("/")));
+        let root = Dir::open(tmp.path()).unwrap();
+        remove_tree(&root, name("wide")).unwrap();
+        remove_tree(&root, name("deep")).unwrap();
+        assert!(entries(&root).unwrap().is_empty());
     }
 
     #[test]
