@@ -133,15 +133,10 @@ pub fn set_times_at(
 /// up to it.
 pub fn reopen_parent<'k>(root: &Dir, key: &'k [u8]) -> Result<(Dir, &'k OsStr), Error> {
     let components: Vec<&[u8]> = key.split(|&b| b == b'/').collect();
-    if components
-        .iter()
-        .any(|c| c.is_empty() || *c == b"." || *c == b"..")
-    {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            format!("not a normalized key: {}", String::from_utf8_lossy(key)),
-        )
-        .into());
+    // Every component, the returned name included, is one valid name: not empty,
+    // `.` or `..`, and free of NUL.
+    for component in &components {
+        crate::sys::check_name(OsStr::from_bytes(component))?;
     }
     let (last, parents) = components.split_last().ok_or(Error::NotADirectory)?;
     let mut dir: Option<Dir> = None;
@@ -422,7 +417,15 @@ mod tests {
     fn reopen_parent_refuses_unnormalized_keys() {
         let tmp = tree(&["src/"]);
         let root = Dir::open(tmp.path()).unwrap();
-        for key in [&b"../x"[..], b"src/../x", b"./x", b"src//x", b"", b"/abs"] {
+        for key in [
+            &b"../x"[..],
+            b"src/../x",
+            b"./x",
+            b"src//x",
+            b"",
+            b"/abs",
+            b"src/a\0b",
+        ] {
             assert!(
                 matches!(reopen_parent(&root, key), Err(Error::Io(_))),
                 "{key:?}"
