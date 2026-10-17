@@ -304,29 +304,36 @@ mod tests {
         let long = vec![b'b'; 64 * 1024];
         write_atomic(&dir, name("state"), &short, 0o600, "state", Point::F4).unwrap();
         let done = Arc::new(AtomicBool::new(false));
+        // The reader is running before the first rewrite and reads once more after
+        // the last one, so every rewrite happens while it reads.
+        let started = Arc::new(Barrier::new(2));
         let reader = {
             let (path, done) = (tmp.path().join("state"), Arc::clone(&done));
             let (short, long) = (short.clone(), long.clone());
+            let started = Arc::clone(&started);
             std::thread::spawn(move || {
-                let mut reads = 0u64;
-                while !done.load(Ordering::Relaxed) {
+                started.wait();
+                loop {
+                    let finished = done.load(Ordering::Acquire);
                     let bytes = std::fs::read(&path).unwrap();
                     assert!(
                         bytes == short || bytes == long,
                         "read {} bytes",
                         bytes.len()
                     );
-                    reads += 1;
+                    if finished {
+                        break;
+                    }
                 }
-                reads
             })
         };
+        started.wait();
         for i in 0..1000 {
             let bytes = if i % 2 == 0 { &long } else { &short };
             write_atomic(&dir, name("state"), bytes, 0o600, "state", Point::F4).unwrap();
         }
-        done.store(true, Ordering::Relaxed);
-        assert!(reader.join().unwrap() > 0);
+        done.store(true, Ordering::Release);
+        reader.join().unwrap();
         assert_eq!(listing(&tmp), ["state"]);
     }
 
