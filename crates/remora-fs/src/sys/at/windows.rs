@@ -337,20 +337,24 @@ fn rename(
     // The classic class has no POSIX semantics and cannot ignore a read-only
     // target, so clear the attribute first. It keeps RootDirectory, so the rename
     // stays relative to the parent handle.
-    if replace {
-        clear_read_only(to_dir, to)?;
-    }
+    let cleared = replace && clear_read_only(to_dir, to)?;
     // In the classic structure the first byte is ReplaceIfExists.
     let replace_flag = u32::from(replace);
-    rename_by_handle(
+    let renamed = rename_by_handle(
         handle.as_handle(),
         to_dir,
         to,
         replace_flag,
         FileRenameInformation,
     )
-    .map_err(in_use_or)?;
-    Ok(())
+    .map_err(in_use_or);
+    if renamed.is_err() && cleared {
+        // A failed rename leaves the target as it was, read-only included. The
+        // rename's error is the one reported.
+        let _ = nt::open(to_dir, to, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, 0)
+            .and_then(|target| set_read_only_on(target.as_handle(), true));
+    }
+    renamed
 }
 
 /// Clears the read-only attribute of `name` in `dir`. Returns whether it was set;
@@ -364,11 +368,20 @@ fn clear_read_only(dir: &Dir, name: &OsStr) -> Result<bool, Error> {
 }
 
 fn clear_read_only_on(handle: BorrowedHandle<'_>) -> io::Result<bool> {
+    set_read_only_on(handle, false)
+}
+
+/// Sets or clears the read-only attribute. Returns whether it changed.
+fn set_read_only_on(handle: BorrowedHandle<'_>, read_only: bool) -> io::Result<bool> {
     let basic: FILE_BASIC_INFO = query(handle, FileBasicInfo)?;
-    if basic.FileAttributes & FILE_ATTRIBUTE_READONLY == 0 {
+    if (basic.FileAttributes & FILE_ATTRIBUTE_READONLY != 0) == read_only {
         return Ok(false);
     }
-    let attributes = basic.FileAttributes & !FILE_ATTRIBUTE_READONLY;
+    let attributes = if read_only {
+        (basic.FileAttributes | FILE_ATTRIBUTE_READONLY) & !FILE_ATTRIBUTE_NORMAL
+    } else {
+        basic.FileAttributes & !FILE_ATTRIBUTE_READONLY
+    };
     // Zero leaves the attributes unchanged, so "none left" is FILE_ATTRIBUTE_NORMAL.
     let clear = FILE_BASIC_INFO {
         FileAttributes: if attributes == 0 {
@@ -1037,6 +1050,25 @@ mod tests {
             std::fs::read(tmp.path().join("sub").join("inner")).unwrap(),
             b"hello"
         );
+    }
+
+    #[test]
+    fn failed_fallback_rename_keeps_target_read_only() {
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+        let (_outside, tmp, root) = setup();
+        let target = tmp.path().join("target");
+        std::fs::write(&target, b"old").unwrap();
+        set_read_only(&target);
+        // Open without delete sharing, so the classic rename cannot replace it.
+        let _held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .open(&target)
+            .unwrap();
+        assert!(rename(&root, name("file"), &root, name("target"), true, true).is_err());
+        assert!(std::fs::metadata(&target).unwrap().permissions().readonly());
+        assert_eq!(std::fs::read(&target).unwrap(), b"old");
+        assert_eq!(std::fs::read(tmp.path().join("file")).unwrap(), b"hello");
     }
 
     #[test]
