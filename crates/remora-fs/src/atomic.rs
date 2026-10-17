@@ -24,9 +24,9 @@ pub struct Temp<'d> {
 }
 
 impl<'d> Temp<'d> {
-    /// Creates a temporary file in `dir`. `purpose` matches `[a-z0-9-]{1,32}`. An
-    /// existing name draws a new one; after 8 names the call fails with
-    /// `AlreadyExists` and creates nothing.
+    /// Creates a temporary file in `dir`. A `purpose` outside `[a-z0-9-]{1,32}` is
+    /// `InvalidInput`. An existing name draws a new one; after 8 names the call
+    /// fails with `AlreadyExists` and creates nothing.
     pub fn create(dir: &'d Dir, purpose: &str) -> io::Result<Self> {
         Self::create_with(dir, purpose, || random::hex(8))
     }
@@ -37,7 +37,12 @@ impl<'d> Temp<'d> {
         purpose: &str,
         mut random: impl FnMut() -> io::Result<String>,
     ) -> io::Result<Self> {
-        debug_assert!(valid_purpose(purpose), "invalid purpose {purpose:?}");
+        if !valid_purpose(purpose) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("temporary file purpose {purpose:?} is not [a-z0-9-]{{1,32}}"),
+            ));
+        }
         for _ in 0..NAME_ATTEMPTS {
             let name = OsString::from(format!(".{purpose}.{}.tmp", random()?));
             match create_private_file(dir, &name) {
@@ -160,8 +165,8 @@ fn create_exclusive_with(
         Ok(()) => temp.armed = false,
         Err(Error::Io(e)) if e.kind() == io::ErrorKind::Unsupported => {
             at::link_at(dir, &temp.name, dir, name)?;
-            temp.armed = false;
             at::unlink_at(dir, &temp.name, false)?;
+            temp.armed = false;
         }
         Err(e) => return Err(e),
     }
@@ -214,6 +219,18 @@ mod tests {
         assert!(temp_name.starts_with(".project."));
         assert_eq!(listing(&tmp), [temp_name]);
         drop(temp);
+        assert!(listing(&tmp).is_empty());
+    }
+
+    #[test]
+    fn invalid_purpose_is_refused() {
+        let tmp = TestDir::new();
+        let dir = Dir::open(tmp.path()).unwrap();
+        let long = "a".repeat(33);
+        for purpose in ["", "Project", "a.b", "a/b", long.as_str()] {
+            let err = Temp::create(&dir, purpose).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{purpose:?}");
+        }
         assert!(listing(&tmp).is_empty());
     }
 
