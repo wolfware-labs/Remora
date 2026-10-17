@@ -337,7 +337,11 @@ fn rename(
     // The classic class has no POSIX semantics and cannot ignore a read-only
     // target, so clear the attribute first. It keeps RootDirectory, so the rename
     // stays relative to the parent handle.
-    let cleared = replace && clear_read_only(to_dir, to)?;
+    let cleared = if replace {
+        clear_read_only(to_dir, to)?
+    } else {
+        None
+    };
     // In the classic structure the first byte is ReplaceIfExists.
     let replace_flag = u32::from(replace);
     let renamed = rename_by_handle(
@@ -348,23 +352,44 @@ fn rename(
         FileRenameInformation,
     )
     .map_err(in_use_or);
-    if renamed.is_err() && cleared {
-        // A failed rename leaves the target as it was, read-only included. The
-        // rename's error is the one reported.
-        let _ = nt::open(to_dir, to, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, 0)
-            .and_then(|target| set_read_only_on(target.as_handle(), true));
+    if renamed.is_err()
+        && let Some(id) = cleared
+    {
+        // A failed rename leaves the target as it was, read-only included, unless
+        // the name now holds another file. The rename's error is the one reported.
+        let _ = nt::open(to_dir, to, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, 0).and_then(
+            |target| {
+                if file_id(target.as_handle())? == id {
+                    set_read_only_on(target.as_handle(), true)?;
+                }
+                Ok(())
+            },
+        );
     }
     renamed
 }
 
-/// Clears the read-only attribute of `name` in `dir`. Returns whether it was set;
-/// a missing name is not an error.
-fn clear_read_only(dir: &Dir, name: &OsStr) -> Result<bool, Error> {
+/// Clears the read-only attribute of `name` in `dir`. Returns the identity of the
+/// file if the attribute was set, `None` otherwise; a missing name is not an error.
+fn clear_read_only(dir: &Dir, name: &OsStr) -> Result<Option<(u64, u128)>, Error> {
     match nt::open(dir, name, FILE_READ_ATTRIBUTES | FILE_WRITE_ATTRIBUTES, 0) {
-        Ok(handle) => clear_read_only_on(handle.as_handle()).map_err(in_use_or),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+        Ok(handle) => {
+            let id = file_id(handle.as_handle()).map_err(in_use_or)?;
+            let cleared = clear_read_only_on(handle.as_handle()).map_err(in_use_or)?;
+            Ok(cleared.then_some(id))
+        }
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
         Err(e) => Err(in_use_or(e)),
     }
+}
+
+/// The volume serial number and the 128-bit file id of an open file.
+fn file_id(handle: BorrowedHandle<'_>) -> io::Result<(u64, u128)> {
+    let id: FILE_ID_INFO = query(handle, FileIdInfo)?;
+    Ok((
+        id.VolumeSerialNumber,
+        u128::from_le_bytes(id.FileId.Identifier),
+    ))
 }
 
 fn clear_read_only_on(handle: BorrowedHandle<'_>) -> io::Result<bool> {
@@ -1006,15 +1031,15 @@ mod tests {
     fn clear_read_only_clears_the_attribute() {
         let (_outside, tmp, root) = setup();
         set_read_only(&tmp.path().join("file"));
-        assert!(clear_read_only(&root, name("file")).unwrap());
+        assert!(clear_read_only(&root, name("file")).unwrap().is_some());
         assert!(
             !std::fs::metadata(tmp.path().join("file"))
                 .unwrap()
                 .permissions()
                 .readonly()
         );
-        assert!(!clear_read_only(&root, name("file")).unwrap());
-        assert!(!clear_read_only(&root, name("missing")).unwrap());
+        assert!(clear_read_only(&root, name("file")).unwrap().is_none());
+        assert!(clear_read_only(&root, name("missing")).unwrap().is_none());
     }
 
     #[test]
