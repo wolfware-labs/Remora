@@ -270,10 +270,6 @@ pub(crate) fn rename_at(
 
 /// The rename without replacing: an existing `to` fails with `AlreadyExists`
 /// and both entries stay as they were.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "create_exclusive_atomic (R0.7) is the caller")
-)]
 pub(crate) fn rename_no_replace(
     from_dir: &Dir,
     from: &OsStr,
@@ -281,6 +277,29 @@ pub(crate) fn rename_no_replace(
     to: &OsStr,
 ) -> Result<(), Error> {
     rename(from_dir, from, to_dir, to, false, false)
+}
+
+/// Hard links are not a fallback on Windows: [`rename_no_replace`] has its own
+/// fallback and never reports `Unsupported`, so this is never reached there.
+pub(crate) fn link_at(
+    _from_dir: &Dir,
+    _from: &OsStr,
+    _to_dir: &Dir,
+    _to: &OsStr,
+) -> Result<(), Error> {
+    Err(io::Error::from(io::ErrorKind::Unsupported).into())
+}
+
+/// The mode is ignored on Windows: access comes from the security descriptor set
+/// at creation.
+pub(crate) fn set_mode(_file: &File, _mode: u32) -> io::Result<()> {
+    Ok(())
+}
+
+/// No call on Windows: NTFS and ReFS journal directory entries, so a directory is
+/// not flushed (spec 5.4).
+pub(crate) fn sync_dir(_dir: &Dir) -> io::Result<()> {
+    Ok(())
 }
 
 /// `FileRenameInformationEx` on a handle to `from` itself, with `RootDirectory`
