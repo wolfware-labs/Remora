@@ -29,7 +29,7 @@ pub fn canonical(path: &Path) -> io::Result<PathBuf> {
             "a canonical path needs an absolute input",
         ));
     }
-    let mut existing = path.to_path_buf();
+    let mut existing = without_verbatim_dots(path)?;
     // The missing components, last first.
     let mut missing: Vec<OsString> = Vec::new();
     loop {
@@ -63,6 +63,32 @@ pub fn canonical(path: &Path) -> io::Result<PathBuf> {
         }
         existing.pop();
     }
+}
+
+/// A verbatim Windows path (`\\?\`) is passed to the filesystem as is, so `.` and
+/// `..` reach it as names: `.` is dropped and `..` refused, as for a missing tail.
+fn without_verbatim_dots(path: &Path) -> io::Result<PathBuf> {
+    let verbatim = matches!(
+        path.components().next(),
+        Some(Component::Prefix(p)) if p.kind().is_verbatim()
+    );
+    if !verbatim {
+        return Ok(path.to_path_buf());
+    }
+    let mut out = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(name) if name == "." => {}
+            Component::Normal(name) if name == ".." => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "`..` in a verbatim path",
+                ));
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
 }
 
 /// A regular file that exists but cannot be opened read-only: its canonical
@@ -333,6 +359,18 @@ mod tests {
             out.as_bytes()[0].is_ascii_uppercase() && &out[1..3] == r":\",
             "{out}"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn verbatim_dot_components_handled() {
+        let tmp = TestDir::new();
+        let base = canonical(tmp.path()).unwrap();
+        let verbatim = format!(r"\\?\{}", base.display());
+        let dot = canonical(Path::new(&format!(r"{verbatim}\x\.\y"))).unwrap();
+        assert_eq!(dot, base.join("x").join("y"));
+        let err = canonical(Path::new(&format!(r"{verbatim}\x\..\y"))).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidInput, "{err}");
     }
 
     #[cfg(windows)]
