@@ -54,11 +54,16 @@ mod imp {
     }
 
     #[cfg(target_os = "linux")]
-    fn read_back(fd: &std::os::fd::OwnedFd) -> io::Result<Vec<u8>> {
+    pub(super) fn read_back(fd: &std::os::fd::OwnedFd) -> io::Result<Vec<u8>> {
         use std::os::fd::AsRawFd;
         let link = rustix::fs::readlink(format!("/proc/self/fd/{}", fd.as_raw_fd()), Vec::new())?;
-        // The kernel appends " (deleted)" once the last link is gone.
-        if rustix::fs::fstat(fd)?.st_nlink == 0 {
+        // Once the name the descriptor was opened by is removed, the kernel appends
+        // " (deleted)", even while another hard link remains. The text alone cannot
+        // tell that from a real name, so the name read back must still lead to the
+        // same file.
+        let opened = rustix::fs::fstat(fd)?;
+        let named = rustix::fs::stat(link.as_c_str())?;
+        if (named.st_dev, named.st_ino) != (opened.st_dev, opened.st_ino) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "removed while being resolved",
@@ -245,6 +250,33 @@ mod tests {
             found.path,
             final_path(tmp.path()).unwrap().path.join("locked")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn name_ending_in_deleted_is_kept() {
+        let tmp = TestDir::new();
+        let file = tmp.path().join("x (deleted)");
+        std::fs::write(&file, b"x").unwrap();
+        let found = final_path(&file).unwrap();
+        assert_eq!(
+            found.path,
+            final_path(tmp.path()).unwrap().path.join("x (deleted)")
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removed_name_with_another_link_is_not_found() {
+        let tmp = TestDir::new();
+        let first = tmp.path().join("first");
+        std::fs::write(&first, b"x").unwrap();
+        std::fs::hard_link(&first, tmp.path().join("second")).unwrap();
+        let fd =
+            rustix::fs::open(&first, rustix::fs::OFlags::PATH, rustix::fs::Mode::empty()).unwrap();
+        std::fs::remove_file(&first).unwrap();
+        let err = imp::read_back(&fd).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotFound, "{err}");
     }
 
     #[cfg(windows)]

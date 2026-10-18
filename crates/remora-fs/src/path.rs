@@ -67,6 +67,8 @@ pub fn canonical(path: &Path) -> io::Result<PathBuf> {
 
 /// A verbatim Windows path (`\\?\`) is passed to the filesystem as is, so `.` and
 /// `..` reach it as names: `.` is dropped and `..` refused, as for a missing tail.
+/// `Path::components` may report them as `CurDir` and `ParentDir` or as normal
+/// names, and `PathBuf::push` would resolve `..` by name, so every form is caught.
 fn without_verbatim_dots(path: &Path) -> io::Result<PathBuf> {
     let verbatim = matches!(
         path.components().next(),
@@ -78,7 +80,14 @@ fn without_verbatim_dots(path: &Path) -> io::Result<PathBuf> {
     let mut out = PathBuf::new();
     for component in path.components() {
         match component {
+            Component::CurDir => {}
             Component::Normal(name) if name == "." => {}
+            Component::ParentDir => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "`..` in a verbatim path",
+                ));
+            }
             Component::Normal(name) if name == ".." => {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
