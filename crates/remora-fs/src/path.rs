@@ -20,8 +20,8 @@ use std::path::{Component, Path, PathBuf};
 /// missing component followed by `..` is never reached. An existing ancestor that
 /// is not a directory fails with `NotADirectory`.
 ///
-/// On macOS, a file that cannot be opened read-only is spelled as its canonical
-/// parent plus the file name as given.
+/// On macOS, a regular file that cannot be opened read-only is spelled as its
+/// canonical parent plus the file name as given.
 pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     if !path.is_absolute() {
         return Err(io::Error::new(
@@ -65,13 +65,17 @@ pub fn canonical(path: &Path) -> io::Result<PathBuf> {
     }
 }
 
-/// A file that exists but cannot be opened read-only: its canonical parent plus
-/// its name as given.
+/// A regular file that exists but cannot be opened read-only: its canonical
+/// parent plus its name as given. A directory or a symlink keeps the error, since
+/// its name alone is not its canonical spelling.
 #[cfg(target_os = "macos")]
 fn unreadable(path: &Path, err: io::Error) -> io::Result<PathBuf> {
     let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
         return Err(err);
     };
+    if !std::fs::symlink_metadata(path).is_ok_and(|m| m.file_type().is_file()) {
+        return Err(err);
+    }
     let found = sys::final_path(parent)?;
     if !found.is_dir {
         return Err(io::ErrorKind::NotADirectory.into());
@@ -264,6 +268,33 @@ mod tests {
         std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000)).unwrap();
         let out = canonical(&file).unwrap();
         assert_eq!(out, canonical(tmp.path()).unwrap().join("locked"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn unreadable_directory_and_link_are_errors() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = TestDir::new();
+        let dir = tmp.mkdir_all("locked");
+        std::fs::write(tmp.path().join("file"), b"x").unwrap();
+        std::fs::set_permissions(
+            tmp.path().join("file"),
+            std::fs::Permissions::from_mode(0o000),
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(tmp.path().join("file"), tmp.path().join("link")).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o311)).unwrap();
+        let dir_err = canonical(&dir).map(drop);
+        let link_err = canonical(&tmp.path().join("link")).map(drop);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root opens anything, so only an unprivileged run sees the errors.
+        if rustix::process::geteuid().is_root() {
+            return;
+        }
+        for err in [dir_err, link_err] {
+            let err = err.unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::PermissionDenied, "{err}");
+        }
     }
 
     #[cfg(target_os = "linux")]
