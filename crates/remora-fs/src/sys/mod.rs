@@ -17,6 +17,7 @@ compile_error!("remora-fs supports Linux, macOS and Windows only");
 pub(crate) mod at;
 mod create;
 mod dir;
+mod final_path;
 mod name;
 #[cfg(windows)]
 mod nt;
@@ -28,6 +29,7 @@ mod umask;
 
 pub(crate) use create::{create_dir, create_file};
 pub use dir::Dir;
+pub(crate) use final_path::final_path;
 pub(crate) use name::{check_name, name_from_bytes};
 #[cfg(unix)]
 pub(crate) use umask::ScopedUmask;
